@@ -52,6 +52,14 @@
  }
  
  func TestLocalityLoadBalancing(t *testing.T) {
+	 // Skip the test if Istio version is below 1.23.1.
+	 if v := os.Getenv("ISTIO_VERSION"); v != "" {
+		 // Simple version check: if version starts with "1.22" or lower, skip.
+		 if strings.HasPrefix(v, "1.22") || strings.HasPrefix(v, "1.21") {
+			 t.Skipf("Skipping locality load balancing test: ISTIO_VERSION=%s does not support PreferClose", v)
+		 }
+	 }
+ 
 	 framework.NewTest(t).Run(func(t framework.TestContext) {
 		 const ns = "sample"
  
@@ -61,6 +69,7 @@
 		 }
  
 		 // Apply the Service manifest with PreferClose load balancing.
+		 // Note the added annotation.
 		 serviceYAML := `
  apiVersion: v1
  kind: Service
@@ -68,6 +77,8 @@
    name: helloworld
    labels:
 	 app: helloworld
+   annotations:
+	 networking.istio.io/traffic-distribution: "PreferClose"
  spec:
    ports:
    - port: 5000
@@ -118,7 +129,7 @@
 		 }
  
 		 // Deploy the remote instance (dep2) on the control-plane node.
-		 // Note: A toleration is added here so that the pod can be scheduled on the control-plane.
+		 // A toleration is added to allow scheduling on the control-plane.
 		 dep2 := `
  apiVersion: apps/v1
  kind: Deployment
@@ -160,7 +171,7 @@
 		 }
  
 		 // Deploy a sleep client on the worker node.
-		 // This client will originate requests from the "local" node.
+		 // This client will originate requests from the local node.
 		 clientDep := `
  apiVersion: apps/v1
  kind: Deployment
@@ -251,3 +262,4 @@
 		 t.Log("Locality failover test passed.")
 	 })
  }
+ 
