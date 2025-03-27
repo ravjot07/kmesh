@@ -35,9 +35,12 @@ func applyManifest(ns, manifest string) error {
 func TestLocalityLoadBalancing(t *testing.T) {
 	framework.NewTest(t).Run(func(t framework.TestContext) {
 		const ns = "sample"
-		const fqdn = "helloworld." + ns + ".svc.cluster.local" // Fully qualified service name
+		// Fully qualified domain name for the service.
+		const fqdn = "helloworld." + ns + ".svc.cluster.local"
+		// The IP obtained from nslookup for the service.
+		const resolvedIP = "fd00:10:96::3b0b"
 
-		// Create the test namespace (ignore error if it already exists).
+		// Create the test namespace.
 		if _, err := shell.Execute(true, "kubectl create namespace "+ns); err != nil {
 			t.Logf("Namespace %s might already exist: %v", ns, err)
 		}
@@ -68,7 +71,7 @@ spec:
 			t.Fatalf("Failed to apply Service manifest: %v", err)
 		}
 
-		// Deploy the local instance (dep1) on the worker node (simulating local zone).
+		// Deploy the local instance on the worker node.
 		depLocal := `
 apiVersion: apps/v1
 kind: Deployment
@@ -105,7 +108,7 @@ spec:
 			t.Fatalf("Failed to deploy local instance (dep1): %v", err)
 		}
 
-		// Deploy the remote instance (dep2) on the control-plane node (simulating a different zone).
+		// Deploy the remote instance on the control-plane node.
 		depRemote := `
 apiVersion: apps/v1
 kind: Deployment
@@ -176,7 +179,7 @@ spec:
 			t.Fatalf("Failed to deploy sleep client: %v", err)
 		}
 
-		// Wait for all deployments to be available.
+		// Wait for deployments to be available.
 		deployments := []string{
 			"helloworld-region-zone1-subzone1",
 			"helloworld-region-zone1-subzone2",
@@ -200,6 +203,8 @@ spec:
 		if err == nil && sleepPod != "" {
 			nslookup, _ := shell.Execute(true, "kubectl exec -n "+ns+" "+sleepPod+" -- nslookup "+fqdn)
 			t.Logf("nslookup output for %s:\n%s", fqdn, nslookup)
+		} else {
+			t.Fatalf("Failed to get sleep pod: %v", err)
 		}
 
 		// Test Locality Preference (PreferClose):
@@ -207,9 +212,8 @@ spec:
 		var localResponse string
 		if err := retry.Until(func() bool {
 			t.Logf("Attempting curl request at %s...", time.Now().Format(time.RFC3339))
-			// Use -6 to force IPv6 and FQDN for proper DNS resolution.
 			out, execErr := shell.Execute(true,
-				"kubectl exec -n "+ns+" "+sleepPod+" -- curl -6 -v -sSL http://"+fqdn+":5000/hello")
+				"kubectl exec -n "+ns+" "+sleepPod+" -- curl -v -sSL --resolve "+fqdn+":5000:"+resolvedIP+" http://"+fqdn+":5000/hello")
 			if execErr != nil {
 				t.Logf("Curl error: %v", execErr)
 				return false
@@ -234,7 +238,7 @@ spec:
 		if err := retry.Until(func() bool {
 			t.Logf("Attempting curl (failover) at %s...", time.Now().Format(time.RFC3339))
 			out, execErr := shell.Execute(true,
-				"kubectl exec -n "+ns+" "+sleepPod+" -- curl -6 -v -sSL http://"+fqdn+":5000/hello")
+				"kubectl exec -n "+ns+" "+sleepPod+" -- curl -v -sSL --resolve "+fqdn+":5000:"+resolvedIP+" http://"+fqdn+":5000/hello")
 			if execErr != nil {
 				t.Logf("Curl error after failover: %v", execErr)
 				return false
