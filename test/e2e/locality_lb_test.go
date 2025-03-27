@@ -190,7 +190,7 @@ spec:
         var localResponse string
         if err := retry.Until(func() bool {
             out, execErr := shell.Execute(true,
-                "kubectl exec -n "+ns+" $(kubectl get pod -n "+ns+" -l app=sleep -o jsonpath='{.items[0].metadata.name}') -c sleep -- curl -sSL http://helloworld:5000/hello")
+                "kubectl exec -n "+ns+" $(kubectl get pod -n "+ns+" -l app=sleep -o jsonpath='{.items[0].metadata.name}') -- curl -sSL http://helloworld:5000/hello")
             if execErr != nil {
                 t.Logf("Curl error: %v", execErr)
                 return false
@@ -215,7 +215,7 @@ spec:
         var failoverResponse string
         if err := retry.Until(func() bool {
             out, execErr := shell.Execute(true,
-                "kubectl exec -n "+ns+" $(kubectl get pod -n "+ns+" -l app=sleep -o jsonpath='{.items[0].metadata.name}') -c sleep -- curl -sSL http://helloworld:5000/hello")
+                "kubectl exec -n "+ns+" $(kubectl get pod -n "+ns+" -l app=sleep -o jsonpath='{.items[0].metadata.name}') -- curl -sSL http://helloworld:5000/hello")
             if execErr != nil {
                 t.Logf("Curl error after failover: %v", execErr)
                 return false
