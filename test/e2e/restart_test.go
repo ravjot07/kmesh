@@ -107,7 +107,7 @@ func daemonsetsetComplete(ds *appsv1.DaemonSet) bool {
 	return ds.Status.UpdatedNumberScheduled == ds.Status.DesiredNumberScheduled && ds.Status.NumberReady == ds.Status.DesiredNumberScheduled && ds.Status.ObservedGeneration >= ds.Generation
 }
 
-func TestServiceRestart(t *testing.T) {
+func TestRestartService(t *testing.T) {
     // Interval between generated requests
     const callInterval = 100 * time.Millisecond
     // We expect 100% success rate if at least one instance remains available during restart.
