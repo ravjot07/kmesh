@@ -41,7 +41,7 @@ func TestLocalityLoadBalancing(t *testing.T) {
 			t.Logf("Namespace %s might already exist: %v", ns, err)
 		}
 
-		// Debug: List current pods and endpoints
+		// Debug: List current pods and endpoints.
 		pods, _ := shell.Execute(true, "kubectl get pods -n "+ns)
 		t.Logf("Initial pods in namespace %s:\n%s", ns, pods)
 		endpoints, _ := shell.Execute(true, "kubectl get endpoints helloworld -n "+ns)
@@ -105,7 +105,7 @@ spec:
 		}
 
 		// Deploy the remote instance (dep2) on the control-plane node (simulating a different zone).
-		// Note: add toleration for scheduling on control-plane.
+		// Add toleration for scheduling on control-plane.
 		depRemote := `
 apiVersion: apps/v1
 kind: Deployment
@@ -200,18 +200,15 @@ spec:
 		var localResponse string
 		if err := retry.Until(func() bool {
 			t.Logf("Attempting curl request at %s...", time.Now().Format(time.RFC3339))
+			// Force IPv6 with the -6 flag.
 			out, execErr := shell.Execute(true,
-				"kubectl exec -n "+ns+" $(kubectl get pod -n "+ns+" -l app=sleep -o jsonpath='{.items[0].metadata.name}') -- curl -v -sSL http://helloworld:5000/hello")
+				"kubectl exec -n "+ns+" $(kubectl get pod -n "+ns+" -l app=sleep -o jsonpath='{.items[0].metadata.name}') -- curl -6 -v -sSL http://helloworld:5000/hello")
 			if execErr != nil {
 				t.Logf("Curl error: %v", execErr)
 				return false
 			}
 			t.Logf("Curl output: %s", out)
-			if strings.Contains(out, "region.zone1.subzone1") {
-				localResponse = out
-				return true
-			}
-			return false
+			return strings.Contains(out, "region.zone1.subzone1")
 		}, retry.Timeout(60*time.Second), retry.Delay(2*time.Second)); err != nil {
 			t.Fatalf("Locality preferred test failed: expected response from region.zone1/subzone1, got: %s", localResponse)
 		}
@@ -226,17 +223,13 @@ spec:
 		if err := retry.Until(func() bool {
 			t.Logf("Attempting curl (failover) at %s...", time.Now().Format(time.RFC3339))
 			out, execErr := shell.Execute(true,
-				"kubectl exec -n "+ns+" $(kubectl get pod -n "+ns+" -l app=sleep -o jsonpath='{.items[0].metadata.name}') -- curl -v -sSL http://helloworld:5000/hello")
+				"kubectl exec -n "+ns+" $(kubectl get pod -n "+ns+" -l app=sleep -o jsonpath='{.items[0].metadata.name}') -- curl -6 -v -sSL http://helloworld:5000/hello")
 			if execErr != nil {
 				t.Logf("Curl error after failover: %v", execErr)
 				return false
 			}
 			t.Logf("Curl output after failover: %s", out)
-			if strings.Contains(out, "region.zone1.subzone2") {
-				failoverResponse = out
-				return true
-			}
-			return false
+			return strings.Contains(out, "region.zone1.subzone2")
 		}, retry.Timeout(60*time.Second), retry.Delay(2*time.Second)); err != nil {
 			t.Fatalf("Locality failover test failed: expected response from region.zone1/subzone2, got: %s", failoverResponse)
 		}
