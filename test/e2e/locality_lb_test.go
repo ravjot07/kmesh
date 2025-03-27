@@ -32,13 +32,35 @@ func applyManifest(ns, manifest string) error {
 	return err
 }
 
+// extractResolvedIP parses the nslookup output to extract the IP address for the service.
+func extractResolvedIP(nslookup string) string {
+	// nslookup output typically contains two "Address:" lines.
+	// The first is the DNS server; the second is the resolved IP.
+	lines := strings.Split(nslookup, "\n")
+	var addresses []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "Address:") {
+			// Remove the "Address:" prefix and trim again.
+			addr := strings.TrimSpace(strings.TrimPrefix(trimmed, "Address:"))
+			// If the address is enclosed in brackets (e.g. "[fd00:10:96::a]:53"), skip it.
+			if strings.Contains(addr, ":53") || strings.HasPrefix(addr, "[") {
+				continue
+			}
+			addresses = append(addresses, addr)
+		}
+	}
+	if len(addresses) > 0 {
+		return addresses[0]
+	}
+	return ""
+}
+
 func TestLocalityLoadBalancing(t *testing.T) {
 	framework.NewTest(t).Run(func(t framework.TestContext) {
 		const ns = "sample"
 		// Fully qualified domain name for the service.
 		const fqdn = "helloworld." + ns + ".svc.cluster.local"
-		// The IP obtained from nslookup for the service.
-		const resolvedIP = "fd00:10:96::3b0b"
 
 		// Create the test namespace.
 		if _, err := shell.Execute(true, "kubectl create namespace "+ns); err != nil {
@@ -71,7 +93,7 @@ spec:
 			t.Fatalf("Failed to apply Service manifest: %v", err)
 		}
 
-		// Deploy the local instance on the worker node.
+		// Deploy the local instance (dep1) on the worker node.
 		depLocal := `
 apiVersion: apps/v1
 kind: Deployment
@@ -108,7 +130,7 @@ spec:
 			t.Fatalf("Failed to deploy local instance (dep1): %v", err)
 		}
 
-		// Deploy the remote instance on the control-plane node.
+		// Deploy the remote instance (dep2) on the control-plane node.
 		depRemote := `
 apiVersion: apps/v1
 kind: Deployment
@@ -179,7 +201,7 @@ spec:
 			t.Fatalf("Failed to deploy sleep client: %v", err)
 		}
 
-		// Wait for deployments to be available.
+		// Wait for all deployments to be available.
 		deployments := []string{
 			"helloworld-region-zone1-subzone1",
 			"helloworld-region-zone1-subzone2",
@@ -200,18 +222,23 @@ spec:
 
 		// Debug: Check DNS resolution from the sleep pod.
 		sleepPod, err := shell.Execute(true, "kubectl get pod -n "+ns+" -l app=sleep -o jsonpath='{.items[0].metadata.name}'")
-		if err == nil && sleepPod != "" {
-			nslookup, _ := shell.Execute(true, "kubectl exec -n "+ns+" "+sleepPod+" -- nslookup "+fqdn)
-			t.Logf("nslookup output for %s:\n%s", fqdn, nslookup)
-		} else {
+		if err != nil || sleepPod == "" {
 			t.Fatalf("Failed to get sleep pod: %v", err)
 		}
+		nslookup, _ := shell.Execute(true, "kubectl exec -n "+ns+" "+sleepPod+" -- nslookup "+fqdn)
+		t.Logf("nslookup output for %s:\n%s", fqdn, nslookup)
+		resolvedIP := extractResolvedIP(nslookup)
+		if resolvedIP == "" {
+			t.Fatalf("Failed to extract resolved IP from nslookup output")
+		}
+		t.Logf("Extracted resolved IP: %s", resolvedIP)
 
 		// Test Locality Preference (PreferClose):
 		t.Log("Testing locality preferred (expect response from region.zone1/subzone1)...")
 		var localResponse string
 		if err := retry.Until(func() bool {
 			t.Logf("Attempting curl request at %s...", time.Now().Format(time.RFC3339))
+			// Use --resolve to force curl to use the extracted IP.
 			out, execErr := shell.Execute(true,
 				"kubectl exec -n "+ns+" "+sleepPod+" -- curl -v -sSL --resolve "+fqdn+":5000:"+resolvedIP+" http://"+fqdn+":5000/hello")
 			if execErr != nil {
