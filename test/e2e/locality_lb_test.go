@@ -35,6 +35,7 @@ func applyManifest(ns, manifest string) error {
 func TestLocalityLoadBalancing(t *testing.T) {
 	framework.NewTest(t).Run(func(t framework.TestContext) {
 		const ns = "sample"
+		const fqdn = "helloworld." + ns + ".svc.cluster.local" // Fully qualified service name
 
 		// Create the test namespace (ignore error if it already exists).
 		if _, err := shell.Execute(true, "kubectl create namespace "+ns); err != nil {
@@ -105,7 +106,6 @@ spec:
 		}
 
 		// Deploy the remote instance (dep2) on the control-plane node (simulating a different zone).
-		// Add toleration for scheduling on control-plane.
 		depRemote := `
 apiVersion: apps/v1
 kind: Deployment
@@ -146,7 +146,7 @@ spec:
 			t.Fatalf("Failed to deploy remote instance (dep2): %v", err)
 		}
 
-		// Deploy a sleep client on the worker node (as the local client origin).
+		// Deploy a sleep client on the worker node.
 		clientDep := `
 apiVersion: apps/v1
 kind: Deployment
@@ -195,20 +195,31 @@ spec:
 		endpoints, _ = shell.Execute(true, "kubectl get endpoints helloworld -n "+ns)
 		t.Logf("Endpoints for service helloworld after deployment:\n%s", endpoints)
 
+		// Debug: Check DNS resolution from the sleep pod.
+		sleepPod, err := shell.Execute(true, "kubectl get pod -n "+ns+" -l app=sleep -o jsonpath='{.items[0].metadata.name}'")
+		if err == nil && sleepPod != "" {
+			nslookup, _ := shell.Execute(true, "kubectl exec -n "+ns+" "+sleepPod+" -- nslookup "+fqdn)
+			t.Logf("nslookup output for %s:\n%s", fqdn, nslookup)
+		}
+
 		// Test Locality Preference (PreferClose):
 		t.Log("Testing locality preferred (expect response from region.zone1/subzone1)...")
 		var localResponse string
 		if err := retry.Until(func() bool {
 			t.Logf("Attempting curl request at %s...", time.Now().Format(time.RFC3339))
-			// Force IPv6 with the -6 flag.
+			// Use -6 to force IPv6 and FQDN for proper DNS resolution.
 			out, execErr := shell.Execute(true,
-				"kubectl exec -n "+ns+" $(kubectl get pod -n "+ns+" -l app=sleep -o jsonpath='{.items[0].metadata.name}') -- curl -6 -v -sSL http://helloworld:5000/hello")
+				"kubectl exec -n "+ns+" "+sleepPod+" -- curl -6 -v -sSL http://"+fqdn+":5000/hello")
 			if execErr != nil {
 				t.Logf("Curl error: %v", execErr)
 				return false
 			}
 			t.Logf("Curl output: %s", out)
-			return strings.Contains(out, "region.zone1.subzone1")
+			if strings.Contains(out, "region.zone1.subzone1") {
+				localResponse = out
+				return true
+			}
+			return false
 		}, retry.Timeout(60*time.Second), retry.Delay(2*time.Second)); err != nil {
 			t.Fatalf("Locality preferred test failed: expected response from region.zone1/subzone1, got: %s", localResponse)
 		}
@@ -223,13 +234,17 @@ spec:
 		if err := retry.Until(func() bool {
 			t.Logf("Attempting curl (failover) at %s...", time.Now().Format(time.RFC3339))
 			out, execErr := shell.Execute(true,
-				"kubectl exec -n "+ns+" $(kubectl get pod -n "+ns+" -l app=sleep -o jsonpath='{.items[0].metadata.name}') -- curl -6 -v -sSL http://helloworld:5000/hello")
+				"kubectl exec -n "+ns+" "+sleepPod+" -- curl -6 -v -sSL http://"+fqdn+":5000/hello")
 			if execErr != nil {
 				t.Logf("Curl error after failover: %v", execErr)
 				return false
 			}
 			t.Logf("Curl output after failover: %s", out)
-			return strings.Contains(out, "region.zone1.subzone2")
+			if strings.Contains(out, "region.zone1.subzone2") {
+				failoverResponse = out
+				return true
+			}
+			return false
 		}, retry.Timeout(60*time.Second), retry.Delay(2*time.Second)); err != nil {
 			t.Fatalf("Locality failover test failed: expected response from region.zone1/subzone2, got: %s", failoverResponse)
 		}
