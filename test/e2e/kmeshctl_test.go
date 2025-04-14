@@ -14,9 +14,9 @@ This test ensures that the authz commands work correctly on a live cluster.
 */
 
 package kmesh
+
 import (
     "bytes"
-    "fmt"
     "os/exec"
     "strings"
     "testing"
