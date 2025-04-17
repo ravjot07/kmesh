@@ -7,7 +7,8 @@ WORKDIR /kmesh
 
 RUN \
     --mount=type=cache,target=/var/cache/dnf \
-    yum install -y kmod util-linux iptables && \
+    yum install -y kmod util-linux iptables \
+                protobuf-c bpftool libbpf && \ 
     mkdir -p /usr/share/oncn-mda && \
     mkdir -p /etc/oncn-mda
 
@@ -17,5 +18,5 @@ COPY out/oncn-mda.conf /etc/oncn-mda/
 COPY out/kmesh-daemon /usr/bin/
 COPY out/kmesh-cni /usr/bin/
 COPY out/mdacore /usr/bin/
-COPY build/docker/start_kmesh.sh /kmesh
+COPY build/docker/start_kmesh.sh /kmesh/
 COPY out/ko /kmesh
