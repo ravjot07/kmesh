@@ -218,7 +218,6 @@ export PATH="$PATH:$TMPBIN"
 # Function to install kmeshctl into the test environment.
 function install_kmeshctl() {
     echo "Installing kmeshctl CLI into test environment..."
-    # Assuming 'make kmeshctl' or the build process has produced a ./kmeshctl binary in ROOT_DIR.
     if [[ -f "$ROOT_DIR/kmeshctl" ]]; then
         cp "$ROOT_DIR/kmeshctl" "$TMPBIN/"  # Copy the binary to TMPBIN, which is on PATH.
         echo "kmeshctl installed successfully in $TMPBIN."
