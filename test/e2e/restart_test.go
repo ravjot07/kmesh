@@ -66,41 +66,41 @@ func TestKmeshRestart(t *testing.T) {
 	})
 }
 
-func restartKmesh(t framework.TestContext) {
-	patchOpts := metav1.PatchOptions{}
-	patchData := fmt.Sprintf(`{
-			"spec": {
-				"template": {
-					"metadata": {
-						"annotations": {
-							"kubectl.kubernetes.io/restartedAt": %q
-						}
-					}
-				}
-			}
-		}`, time.Now().Format(time.RFC3339))
-	ds := t.Clusters().Default().Kube().AppsV1().DaemonSets(KmeshNamespace)
-	_, err := ds.Patch(context.Background(), KmeshDaemonsetName, types.StrategicMergePatchType, []byte(patchData), patchOpts)
-	if err != nil {
-		t.Fatal(err)
-	}
+// func restartKmesh(t framework.TestContext) {
+// 	patchOpts := metav1.PatchOptions{}
+// 	patchData := fmt.Sprintf(`{
+// 			"spec": {
+// 				"template": {
+// 					"metadata": {
+// 						"annotations": {
+// 							"kubectl.kubernetes.io/restartedAt": %q
+// 						}
+// 					}
+// 				}
+// 			}
+// 		}`, time.Now().Format(time.RFC3339))
+// 	ds := t.Clusters().Default().Kube().AppsV1().DaemonSets(KmeshNamespace)
+// 	_, err := ds.Patch(context.Background(), KmeshDaemonsetName, types.StrategicMergePatchType, []byte(patchData), patchOpts)
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
 
-	if err := retry.UntilSuccess(func() error {
-		d, err := ds.Get(context.Background(), KmeshDaemonsetName, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		if !daemonsetsetComplete(d) {
-			return fmt.Errorf("rollout is not yet done")
-		}
-		return nil
-	}, retry.Timeout(60*time.Second), retry.Delay(2*time.Second)); err != nil {
-		t.Fatal("failed to wait for Kmesh rollout status for: %v", err)
-	}
-	if _, err := kubetest.CheckPodsAreReady(kubetest.NewPodFetch(t.AllClusters()[0], KmeshNamespace, "app=kmesh")); err != nil {
-		t.Fatal(err)
-	}
-}
+// 	if err := retry.UntilSuccess(func() error {
+// 		d, err := ds.Get(context.Background(), KmeshDaemonsetName, metav1.GetOptions{})
+// 		if err != nil {
+// 			return err
+// 		}
+// 		if !daemonsetsetComplete(d) {
+// 			return fmt.Errorf("rollout is not yet done")
+// 		}
+// 		return nil
+// 	}, retry.Timeout(60*time.Second), retry.Delay(2*time.Second)); err != nil {
+// 		t.Fatal("failed to wait for Kmesh rollout status for: %v", err)
+// 	}
+// 	if _, err := kubetest.CheckPodsAreReady(kubetest.NewPodFetch(t.AllClusters()[0], KmeshNamespace, "app=kmesh")); err != nil {
+// 		t.Fatal(err)
+// 	}
+// }
 
 func daemonsetsetComplete(ds *appsv1.DaemonSet) bool {
 	return ds.Status.UpdatedNumberScheduled == ds.Status.DesiredNumberScheduled && ds.Status.NumberReady == ds.Status.DesiredNumberScheduled && ds.Status.ObservedGeneration >= ds.Generation
