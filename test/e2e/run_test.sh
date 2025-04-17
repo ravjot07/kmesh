@@ -21,7 +21,7 @@ mkdir -p "${TMPBIN}"
 
 export PATH="$PATH:$TMPBIN"
 
-# Provision a kind clustr for testing.
+# Provision a kind clustr for 
 function setup_kind_cluster() {
     local NAME="${1:-kmesh-testing}"
     local IMAGE="${2:-"${DEFAULT_KIND_IMAGE}"}"
