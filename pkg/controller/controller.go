@@ -31,7 +31,6 @@ import (
 	"kmesh.net/kmesh/pkg/controller/encryption/ipsec"
 	manage "kmesh.net/kmesh/pkg/controller/manage"
 	"kmesh.net/kmesh/pkg/controller/security"
-	"kmesh.net/kmesh/pkg/dns"
 	"kmesh.net/kmesh/pkg/kolog"
 	"kmesh.net/kmesh/pkg/kube"
 	"kmesh.net/kmesh/pkg/logger"
@@ -52,16 +51,18 @@ type Controller struct {
 	enableByPass        bool
 	enableSecretManager bool
 	bpfConfig           *options.BpfConfig
+	loader              *bpf.BpfLoader
 }
 
-func NewController(opts *options.BootstrapConfigs, bpfAdsObj *bpfads.BpfAds, bpfWorkloadObj *bpfwl.BpfWorkload) *Controller {
+func NewController(opts *options.BootstrapConfigs, bpfLoader *bpf.BpfLoader) *Controller {
 	return &Controller{
 		mode:                opts.BpfConfig.Mode,
 		enableByPass:        opts.ByPassConfig.EnableByPass,
-		bpfAdsObj:           bpfAdsObj,
-		bpfWorkloadObj:      bpfWorkloadObj,
+		bpfAdsObj:           bpfLoader.GetBpfKmesh(),
+		bpfWorkloadObj:      bpfLoader.GetBpfWorkload(),
 		enableSecretManager: opts.SecretManagerConfig.Enable,
 		bpfConfig:           opts.BpfConfig,
+		loader:              bpfLoader,
 	}
 }
 
@@ -139,12 +140,7 @@ func (c *Controller) Start(stopCh <-chan struct{}) error {
 	// kmeshConfigMap.Monitoring initialized to uint32(1).
 	// If the startup parameter is false, update the kmeshConfigMap.
 	if !c.bpfConfig.EnableMonitoring {
-		config, err := bpf.GetKmeshConfigMap(c.bpfWorkloadObj.SockConn.KmConfigmap)
-		if err != nil {
-			return fmt.Errorf("failed to get kmesh config map: %v", err)
-		}
-		config.EnableMonitoring = constants.DISABLED
-		if err := bpf.UpdateKmeshConfigMap(c.bpfWorkloadObj.SockConn.KmConfigmap, config); err != nil {
+		if err := c.loader.UpdateEnableMonitoring(constants.DISABLED); err != nil {
 			return fmt.Errorf("Failed to update config in order to start metric: %v", err)
 		}
 	}
@@ -153,15 +149,8 @@ func (c *Controller) Start(stopCh <-chan struct{}) error {
 
 	if c.client.WorkloadController != nil {
 		c.client.WorkloadController.Run(ctx)
-	}
-
-	if c.client.AdsController != nil {
-		dnsResolver, err := dns.NewDNSResolver(c.client.AdsController.Processor.Cache)
-		if err != nil {
-			return fmt.Errorf("dns resolver create failed: %v", err)
-		}
-		dnsResolver.StartDNSResolver(stopCh)
-		c.client.AdsController.Processor.DnsResolverChan = dnsResolver.DnsResolverChan
+	} else {
+		c.client.AdsController.StartDnsController(stopCh)
 	}
 
 	return c.client.Run(stopCh)

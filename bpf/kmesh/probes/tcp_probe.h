@@ -35,18 +35,19 @@ struct tcp_probe_info {
     __u32 type;
     struct bpf_sock_tuple tuple;
     struct orig_dst_info orig_dst;
-    __u32 sent_bytes;
-    __u32 received_bytes;
+    __u32 sent_bytes;     /* Total send bytes from start to last_report_ns */
+    __u32 received_bytes; /* Total recv bytes from start to last_report_ns */
     __u32 conn_success;
     __u32 direction;
     __u32 state;    /* tcp state */
     __u64 duration; // ns
-    __u64 close_ns;
+    __u64 start_ns;
+    __u64 last_report_ns; /*timestamp of the last metrics report*/
     __u32 protocol;
-    __u32 srtt_us; /* smoothed round trip time << 3 in usecs */
-    __u32 rtt_min;
-    __u32 total_retrans; /* Total retransmits for entire connection */
-    __u32 lost_out;      /* Lost packets			*/
+    __u32 srtt_us;       /* smoothed round trip time << 3 in usecs until last_report_ns */
+    __u32 rtt_min;       /* min round trip time in usecs until last_report_ns */
+    __u32 total_retrans; /* Total retransmits from start to last_report_ns */
+    __u32 lost_out;      /* Lost packets from start to last_report_ns	*/
 };
 
 struct {
@@ -106,25 +107,23 @@ static inline void get_tcp_probe_info(struct bpf_tcp_sock *tcp_sock, struct tcp_
     return;
 }
 
-// construct_orig_dst_info try to read the dst_info from map_of_orig_dst first
+// construct_orig_dst_info try to read the dst_info from map_of_sock_storage first
 // if not found, use the tuple info for orig_dst
 static inline void construct_orig_dst_info(struct bpf_sock *sk, struct tcp_probe_info *info)
 {
-    __u64 *current_sk = (__u64 *)sk;
-    struct bpf_sock_tuple *dst;
-    dst = bpf_map_lookup_elem(&map_of_orig_dst, &current_sk);
-
-    // when dst not found, metric controller will read orig dst from actual dst
-    if (!dst) {
+    struct sock_storage_data *storage = NULL;
+    storage = bpf_sk_storage_get(&map_of_sock_storage, sk, 0, 0);
+    if (!storage) {
+        BPF_LOG(ERR, PROBE, "on close: bpf_sk_storage_get failed\n");
         return;
     }
 
     if (sk->family == AF_INET) {
-        info->orig_dst.ipv4.addr = dst->ipv4.daddr;
-        info->orig_dst.ipv4.port = bpf_ntohs(dst->ipv4.dport);
+        info->orig_dst.ipv4.addr = storage->sk_tuple.ipv4.daddr;
+        info->orig_dst.ipv4.port = bpf_ntohs(storage->sk_tuple.ipv4.dport);
     } else {
-        bpf_memcpy(info->orig_dst.ipv6.addr, dst->ipv6.daddr, IPV6_ADDR_LEN);
-        info->orig_dst.ipv6.port = bpf_ntohs(dst->ipv6.dport);
+        bpf_memcpy(info->orig_dst.ipv6.addr, storage->sk_tuple.ipv6.daddr, IPV6_ADDR_LEN);
+        info->orig_dst.ipv6.port = bpf_ntohs(storage->sk_tuple.ipv6.dport);
     }
 
     if (is_ipv4_mapped_addr(info->orig_dst.ipv6.addr)) {
@@ -147,12 +146,9 @@ tcp_report(struct bpf_sock *sk, struct bpf_tcp_sock *tcp_sock, struct sock_stora
     }
 
     construct_tuple(sk, &info->tuple, storage->direction);
+    info->start_ns = storage->connect_ns;
     info->state = state;
     info->direction = storage->direction;
-    if (state == BPF_TCP_CLOSE) {
-        info->close_ns = bpf_ktime_get_ns();
-        info->duration = info->close_ns - storage->connect_ns;
-    }
     info->conn_success = storage->connect_success;
     get_tcp_probe_info(tcp_sock, info);
     (*info).type = (sk->family == AF_INET) ? IPV4 : IPV6;
@@ -161,6 +157,9 @@ tcp_report(struct bpf_sock *sk, struct bpf_tcp_sock *tcp_sock, struct sock_stora
     }
 
     construct_orig_dst_info(sk, info);
+    info->last_report_ns = bpf_ktime_get_ns();
+    info->duration = info->last_report_ns - storage->connect_ns;
+    storage->last_report_ns = info->last_report_ns;
     bpf_ringbuf_submit(info, 0);
 }
 

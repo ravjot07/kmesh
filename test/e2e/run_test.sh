@@ -112,24 +112,25 @@ function setup_istio() {
 }
 
 function setup_kmesh() {
-    helm install kmesh $ROOT_DIR/deploy/charts/kmesh-helm -n kmesh-system --create-namespace --set deploy.kmesh.image.repository=localhost:5000/kmesh \
-    --set deploy.kmesh.containers.kmeshDaemonArgs="--mode=dual-engine --enable-bpf-log=true  --enable-bpf-log=true --monitoring=true"
+    helm install kmesh $ROOT_DIR/deploy/charts/kmesh-helm \
+        -n kmesh-system --create-namespace \
+        --set deploy.kmesh.image.repository=localhost:5000/kmesh \
+        --set deploy.kmesh.containers.kmeshDaemonArgs="--mode=dual-engine --enable-bpf-log=true --enable-bypass=false --monitoring=true"
 
     # Wait for all Kmesh pods to be ready.
     while true; do
-        pod_statuses=$(kubectl get pods -n kmesh-system -l app=kmesh -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{"\n"}{end}')
+        pod_statuses=$(kubectl get pods -n kmesh-system -l app=kmesh \
+            -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{"\n"}{end}')
 
         running_pods=0
         total_pods=0
 
         while read -r pod_name pod_status; do
             total_pods=$((total_pods + 1))
-            if [ "$pod_status" = "Running" ]; then
-                running_pods=$((running_pods + 1))
-            fi
+            [[ "$pod_status" == "Running" ]] && running_pods=$((running_pods + 1))
         done <<< "$pod_statuses"
 
-        if [ "$running_pods" -eq "$total_pods" ]; then
+        if [[ "$running_pods" -eq "$total_pods" ]]; then
             echo "All pods of Kmesh daemon are in Running state."
             break
         fi
@@ -138,6 +139,7 @@ function setup_kmesh() {
         sleep 1
     done
 }
+
 
 export KIND_REGISTRY_NAME="kind-registry"
 export KIND_REGISTRY_PORT="5000"

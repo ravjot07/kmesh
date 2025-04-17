@@ -24,14 +24,6 @@ type KmeshSockopsWorkloadBpfSockTuple struct {
 
 type KmeshSockopsWorkloadBuf struct{ Data [40]int8 }
 
-type KmeshSockopsWorkloadKmeshConfig struct {
-	BpfLogLevel      uint32
-	NodeIp           [4]uint32
-	PodGateway       [4]uint32
-	AuthzOffload     uint32
-	EnableMonitoring uint32
-}
-
 type KmeshSockopsWorkloadManagerKey struct {
 	NetnsCookie uint64
 	_           [8]byte
@@ -53,9 +45,15 @@ type KmeshSockopsWorkloadOperationUsageKey struct {
 
 type KmeshSockopsWorkloadSockStorageData struct {
 	ConnectNs      uint64
+	LastReportNs   uint64
 	Direction      uint8
 	ConnectSuccess uint8
-	_              [6]byte
+	ViaWaypoint    bool
+	HasEncoded     bool
+	HasSetIp       bool
+	_              [3]byte
+	SkTuple        KmeshSockopsWorkloadBpfSockTuple
+	_              [4]byte
 }
 
 // LoadKmeshSockopsWorkload returns the embedded CollectionSpec for KmeshSockopsWorkload.
@@ -110,12 +108,10 @@ type KmeshSockopsWorkloadMapSpecs struct {
 	KmAuthReq     *ebpf.MapSpec `ebpf:"km_auth_req"`
 	KmAuthRes     *ebpf.MapSpec `ebpf:"km_auth_res"`
 	KmBackend     *ebpf.MapSpec `ebpf:"km_backend"`
-	KmConfigmap   *ebpf.MapSpec `ebpf:"km_configmap"`
 	KmEndpoint    *ebpf.MapSpec `ebpf:"km_endpoint"`
 	KmFrontend    *ebpf.MapSpec `ebpf:"km_frontend"`
 	KmLogEvent    *ebpf.MapSpec `ebpf:"km_log_event"`
 	KmManage      *ebpf.MapSpec `ebpf:"km_manage"`
-	KmOrigDst     *ebpf.MapSpec `ebpf:"km_orig_dst"`
 	KmPerfInfo    *ebpf.MapSpec `ebpf:"km_perf_info"`
 	KmPerfMap     *ebpf.MapSpec `ebpf:"km_perf_map"`
 	KmService     *ebpf.MapSpec `ebpf:"km_service"`
@@ -134,7 +130,10 @@ type KmeshSockopsWorkloadMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type KmeshSockopsWorkloadVariableSpecs struct {
-	BpfLogLevel *ebpf.VariableSpec `ebpf:"bpf_log_level"`
+	BpfLogLevel      *ebpf.VariableSpec `ebpf:"bpf_log_level"`
+	EnableMonitoring *ebpf.VariableSpec `ebpf:"enable_monitoring"`
+	NodeIp           *ebpf.VariableSpec `ebpf:"node_ip"`
+	PodGateway       *ebpf.VariableSpec `ebpf:"pod_gateway"`
 }
 
 // KmeshSockopsWorkloadObjects contains all objects after they have been loaded into the kernel.
@@ -160,12 +159,10 @@ type KmeshSockopsWorkloadMaps struct {
 	KmAuthReq     *ebpf.Map `ebpf:"km_auth_req"`
 	KmAuthRes     *ebpf.Map `ebpf:"km_auth_res"`
 	KmBackend     *ebpf.Map `ebpf:"km_backend"`
-	KmConfigmap   *ebpf.Map `ebpf:"km_configmap"`
 	KmEndpoint    *ebpf.Map `ebpf:"km_endpoint"`
 	KmFrontend    *ebpf.Map `ebpf:"km_frontend"`
 	KmLogEvent    *ebpf.Map `ebpf:"km_log_event"`
 	KmManage      *ebpf.Map `ebpf:"km_manage"`
-	KmOrigDst     *ebpf.Map `ebpf:"km_orig_dst"`
 	KmPerfInfo    *ebpf.Map `ebpf:"km_perf_info"`
 	KmPerfMap     *ebpf.Map `ebpf:"km_perf_map"`
 	KmService     *ebpf.Map `ebpf:"km_service"`
@@ -185,12 +182,10 @@ func (m *KmeshSockopsWorkloadMaps) Close() error {
 		m.KmAuthReq,
 		m.KmAuthRes,
 		m.KmBackend,
-		m.KmConfigmap,
 		m.KmEndpoint,
 		m.KmFrontend,
 		m.KmLogEvent,
 		m.KmManage,
-		m.KmOrigDst,
 		m.KmPerfInfo,
 		m.KmPerfMap,
 		m.KmService,
@@ -210,7 +205,10 @@ func (m *KmeshSockopsWorkloadMaps) Close() error {
 //
 // It can be passed to LoadKmeshSockopsWorkloadObjects or ebpf.CollectionSpec.LoadAndAssign.
 type KmeshSockopsWorkloadVariables struct {
-	BpfLogLevel *ebpf.Variable `ebpf:"bpf_log_level"`
+	BpfLogLevel      *ebpf.Variable `ebpf:"bpf_log_level"`
+	EnableMonitoring *ebpf.Variable `ebpf:"enable_monitoring"`
+	NodeIp           *ebpf.Variable `ebpf:"node_ip"`
+	PodGateway       *ebpf.Variable `ebpf:"pod_gateway"`
 }
 
 // KmeshSockopsWorkloadPrograms contains all programs after they have been loaded into the kernel.

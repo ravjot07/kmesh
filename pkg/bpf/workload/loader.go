@@ -26,6 +26,7 @@ import (
 	"github.com/cilium/ebpf"
 
 	"kmesh.net/kmesh/daemon/options"
+	"kmesh.net/kmesh/pkg/bpf/factory"
 	"kmesh.net/kmesh/pkg/bpf/general"
 	"kmesh.net/kmesh/pkg/bpf/utils"
 	"kmesh.net/kmesh/pkg/logger"
@@ -34,11 +35,12 @@ import (
 var log = logger.NewLoggerScope("bpf_workload")
 
 type BpfWorkload struct {
-	SockConn SockConnWorkload
-	SockOps  BpfSockOpsWorkload
-	XdpAuth  BpfXdpAuthWorkload
-	SendMsg  BpfSendMsgWorkload
-	Tc       *general.BpfTCGeneral
+	SockConn  SockConnWorkload
+	SockOps   BpfSockOpsWorkload
+	XdpAuth   BpfXdpAuthWorkload
+	SendMsg   BpfSendMsgWorkload
+	CgroupSkb BpfCroupSkbWorkload
+	Tc        *general.BpfTCGeneral
 }
 
 func NewBpfWorkload(cfg *options.BpfConfig) (*BpfWorkload, error) {
@@ -52,6 +54,9 @@ func NewBpfWorkload(cfg *options.BpfConfig) (*BpfWorkload, error) {
 		return nil, err
 	}
 
+	if err := workloadObj.CgroupSkb.NewBpf(cfg); err != nil {
+		return nil, err
+	}
 	if err := workloadObj.XdpAuth.NewBpf(cfg); err != nil {
 		return nil, err
 	}
@@ -101,12 +106,14 @@ func (w *BpfWorkload) Stop() error {
 	return w.Detach()
 }
 
-func (w *BpfWorkload) GetKmeshConfigMap() *ebpf.Map {
-	return w.SockConn.KmConfigmap
-}
-
-func (w *BpfWorkload) GetBpfLogLevelVariable() *ebpf.Variable {
-	return w.SockConn.BpfLogLevel
+func (w *BpfWorkload) GetBpfConfigVariable() factory.KmeshBpfConfig {
+	return factory.KmeshBpfConfig{
+		BpfLogLevel:      w.SockOps.BpfLogLevel,
+		NodeIP:           w.SockOps.NodeIp,
+		PodGateway:       w.SockOps.PodGateway,
+		AuthzOffload:     w.XdpAuth.AuthzOffload,
+		EnableMonitoring: w.SockOps.EnableMonitoring,
+	}
 }
 
 func (w *BpfWorkload) Load() error {
@@ -123,6 +130,10 @@ func (w *BpfWorkload) Load() error {
 	}
 
 	if err := w.SendMsg.LoadSendMsg(); err != nil {
+		return err
+	}
+
+	if err := w.CgroupSkb.LoadCgroupSkb(); err != nil {
 		return err
 	}
 
@@ -145,6 +156,10 @@ func (w *BpfWorkload) Attach() error {
 		return err
 	}
 
+	if err := w.CgroupSkb.Attach(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -154,6 +169,10 @@ func (w *BpfWorkload) Detach() error {
 	}
 
 	if err := w.SendMsg.Detach(); err != nil {
+		return err
+	}
+
+	if err := w.CgroupSkb.Detach(); err != nil {
 		return err
 	}
 
