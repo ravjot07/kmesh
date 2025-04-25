@@ -523,27 +523,25 @@ func TestKmeshctlWaypoint(t *testing.T) {
 
     // 5) Delete
     t.Run("delete", func(t *testing.T) {
-		// delete everything in default namespace
-		out, err := runCmd(t, "delete", "--all", "-n", "default")
-		t.Logf("kmeshctl waypoint delete --all -n default:\n%s", out)
-		if err != nil {
-			t.Fatalf("delete failed: %v\noutput:\n%s", err, out)
-		}
-		// should report that our waypoint was deleted
-		if !strings.Contains(out, "waypoint default/waypoint deleted") {
-			t.Errorf("expected delete confirmation, got:\n%s", out)
-		}
-	})
+        out, err := runCmd(t, "waypoint", "delete", "--all", "-n", testNamespace)
+        t.Logf("kmeshctl waypoint delete --all -n %s:\n%s", testNamespace, out)
+        if err != nil {
+            t.Fatalf("delete failed: %v\noutput:\n%s", err, out)
+        }
+        if !strings.Contains(out, fmt.Sprintf("waypoint %s/%s deleted", testNamespace, waypointName)) {
+            t.Errorf("expected delete confirmation, got:\n%s", out)
+        }
+    })
 
     // 6) List again — should be empty
     t.Run("list-after-delete", func(t *testing.T) {
-		out, err := runCmd(t, "list", "-n", "default")
-		t.Logf("kmeshctl waypoint list -n default after delete:\n%s", out)
-		if err != nil {
-			t.Fatalf("list after delete failed: %v", err)
-		}
-		if !strings.Contains(out, "No waypoints found.") {
-			t.Errorf("expected 'No waypoints found.', got:\n%s", out)
-		}
-	})
+        out, err := runCmd(t, "waypoint", "list", "-n", testNamespace)
+        t.Logf("kmeshctl waypoint list -n %s after delete:\n%s", testNamespace, out)
+        if err != nil {
+            t.Fatalf("list after delete failed: %v\noutput:\n%s", err, out)
+        }
+        if !strings.Contains(out, "No waypoints found.") {
+            t.Errorf("expected 'No waypoints found.', got:\n%s", out)
+        }
+    })
 }
