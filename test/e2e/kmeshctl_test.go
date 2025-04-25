@@ -524,7 +524,7 @@ func TestKmeshctlWaypoint(t *testing.T) {
     // 5) Delete
     t.Run("delete", func(t *testing.T) {
 		// delete everything in default namespace
-		out, err := runWaypointCmd("delete", "--all", "-n", "default")
+		out, err := runCmd("delete", "--all", "-n", "default")
 		t.Logf("kmeshctl waypoint delete --all -n default:\n%s", out)
 		if err != nil {
 			t.Fatalf("delete failed: %v\noutput:\n%s", err, out)
@@ -537,7 +537,7 @@ func TestKmeshctlWaypoint(t *testing.T) {
 
     // 6) List again — should be empty
     t.Run("list-after-delete", func(t *testing.T) {
-		out, err := runWaypointCmd("list", "-n", "default")
+		out, err := runCmd("list", "-n", "default")
 		t.Logf("kmeshctl waypoint list -n default after delete:\n%s", out)
 		if err != nil {
 			t.Fatalf("list after delete failed: %v", err)
