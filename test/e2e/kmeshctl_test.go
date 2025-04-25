@@ -445,3 +445,102 @@
 		 }
 	 })
  }
+
+
+const (
+    testNamespace = "default"     // namespace to exercise waypoint in
+    waypointName  = "waypoint"    // default name
+    waitTimeout   = 90 * time.Second
+)
+
+// runCmd runs kmeshctl with given args, returning stdout+stderr as a trimmed string.
+func runCmd(t *testing.T, args ...string) (string, error) {
+    t.Helper()
+    cmd := exec.Command("kmeshctl", args...)
+    out, err := cmd.CombinedOutput()
+    outStr := strings.TrimSpace(string(out))
+    t.Logf("kmeshctl %s:\n%s", strings.Join(args, " "), outStr)
+    return outStr, err
+}
+
+func TestKmeshctlWaypoint(t *testing.T) {
+    // 1) Generate
+    t.Run("generate", func(t *testing.T) {
+        out, err := runCmd(t, "waypoint", "generate", "-n", testNamespace)
+        if err != nil {
+            t.Fatalf("generate failed: %v", err)
+        }
+        if !strings.Contains(out, "kind: Gateway") {
+            t.Errorf("expected YAML to contain 'kind: Gateway', got:\n%s", out)
+        }
+        if !strings.Contains(out, fmt.Sprintf("namespace: %s", testNamespace)) {
+            t.Errorf("expected YAML to contain 'namespace: %s', got:\n%s", testNamespace, out)
+        }
+        if !strings.Contains(out, fmt.Sprintf("name: %s", waypointName)) {
+            t.Errorf("expected YAML to contain 'name: %s', got:\n%s", waypointName, out)
+        }
+    })
+
+    // 2) Apply (with --wait)
+    t.Run("apply", func(t *testing.T) {
+        out, err := runCmd(t, "waypoint", "apply", "-n", testNamespace, "-w")
+        if err != nil {
+            t.Fatalf("apply failed: %v", err)
+        }
+        want := fmt.Sprintf("waypoint %s/%s applied", testNamespace, waypointName)
+        if !strings.Contains(out, want) {
+            t.Errorf("expected apply confirmation %q, got:\n%s", want, out)
+        }
+    })
+
+    // 3) List
+    t.Run("list", func(t *testing.T) {
+        // give API a moment to settle
+        time.Sleep(2 * time.Second)
+        out, err := runCmd(t, "waypoint", "list", "-n", testNamespace)
+        if err != nil {
+            t.Fatalf("list failed: %v", err)
+        }
+        if !strings.Contains(out, waypointName) {
+            t.Errorf("expected list to include %q, got:\n%s", waypointName, out)
+        }
+    })
+
+    // 4) Status
+    t.Run("status", func(t *testing.T) {
+        out, err := runCmd(t, "waypoint", "status", "-n", testNamespace)
+        if err != nil {
+            t.Fatalf("status failed: %v", err)
+        }
+        // header line must appear
+        if !strings.Contains(out, "NAME") || !strings.Contains(out, "STATUS") {
+            t.Errorf("expected status header 'NAME' and 'STATUS', got:\n%s", out)
+        }
+        if !strings.Contains(out, waypointName) {
+            t.Errorf("expected status to include %q, got:\n%s", waypointName, out)
+        }
+    })
+
+    // 5) Delete
+    t.Run("delete", func(t *testing.T) {
+        out, err := runCmd(t, "waypoint", "delete", "-n", testNamespace)
+        if err != nil {
+            t.Fatalf("delete failed: %v", err)
+        }
+        want := fmt.Sprintf("waypoint %s/%s deleted", testNamespace, waypointName)
+        if !strings.Contains(out, want) {
+            t.Errorf("expected delete confirmation %q, got:\n%s", want, out)
+        }
+    })
+
+    // 6) List again — should be empty
+    t.Run("list-after-delete", func(t *testing.T) {
+        out, err := runCmd(t, "waypoint", "list", "-n", testNamespace)
+        if err != nil {
+            t.Fatalf("list after delete failed: %v", err)
+        }
+        if !strings.Contains(out, "No waypoints found.") {
+            t.Errorf("expected 'No waypoints found.', got:\n%s", out)
+        }
+    })
+}
