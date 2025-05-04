@@ -110,7 +110,7 @@ func init() {
 		panic(fmt.Sprintf("❌ failed to find any Kmesh pod: %v\n%s",
 			err, string(out)))
 	}
-	kmeshPodName = strings.TrimSpace(string(out))
+	podName = strings.TrimSpace(string(out))
 }
 
 // --- Version tests ---
