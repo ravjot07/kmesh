@@ -30,7 +30,6 @@
  
  // applyYAML writes the given manifest to a temp file and applies it via kubectl.
  func applyYAML(manifest string) error {
-	 // Debug: preview the manifest
 	 preview := manifest
 	 if len(preview) > 200 {
 		 preview = preview[:200] + "…"
@@ -98,10 +97,9 @@
 		 t.Fatalf("failed to enable XDP authz: %v\n%s", err, string(out))
 	 }
  
-	 // 2) Deploy Fortio server + service
+	 // Deploy Fortio server + service
 	 t.Log("=== Deploying Fortio server + service ===")
-	 serverYAML := `
- apiVersion: apps/v1
+	 serverYAML := `apiVersion: apps/v1
  kind: Deployment
  metadata:
    name: fortio-server
@@ -139,10 +137,9 @@
 	 defer deleteResource("deployment", "fortio-server")
 	 defer deleteResource("service", "fortio-server")
  
-	 // 3) Deploy Fortio client (sleeping pod)
+	 // Deploy Fortio client (sleeping pod)
 	 t.Log("=== Deploying Fortio client ===")
-	 clientYAML := `
- apiVersion: apps/v1
+	 clientYAML := `apiVersion: apps/v1
  kind: Deployment
  metadata:
    name: fortio-client
@@ -168,7 +165,7 @@
 	 }
 	 defer deleteResource("deployment", "fortio-client")
  
-	 // 4) Wait for pods to be Ready, with debug dumps on failure
+	 // Wait for pods to be Ready, with debug on failure
 	 t.Log("Waiting for fortio-server to be Ready")
 	 if err := osExec.Command("kubectl", "wait", "-n", ns,
 		 "--for=condition=Ready", "pod", "-l", "app=fortio-server",
@@ -180,11 +177,7 @@
 		 describe, _ := osExec.Command("kubectl", "describe", "pod", serverPodName, "-n", ns).CombinedOutput()
 		 logs, _ := osExec.Command("kubectl", "logs", serverPodName, "-n", ns).CombinedOutput()
 		 t.Fatalf("fortio-server not ready: %v\n\nPods:\n%s\n\nDescribe %s:\n%s\n\nLogs %s:\n%s",
-			 err,
-			 string(podsList),
-			 serverPodName, string(describe),
-			 serverPodName, string(logs),
-		 )
+			 err, podsList, serverPodName, describe, serverPodName, logs)
 	 }
  
 	 t.Log("Waiting for fortio-client to be Ready")
@@ -198,14 +191,10 @@
 		 describe, _ := osExec.Command("kubectl", "describe", "pod", clientPodName, "-n", ns).CombinedOutput()
 		 logs, _ := osExec.Command("kubectl", "logs", clientPodName, "-n", ns).CombinedOutput()
 		 t.Fatalf("fortio-client not ready: %v\n\nPods:\n%s\n\nDescribe %s:\n%s\n\nLogs %s:\n%s",
-			 err,
-			 string(podsList),
-			 clientPodName, string(describe),
-			 clientPodName, string(logs),
-		 )
+			 err, podsList, clientPodName, describe, clientPodName, logs)
 	 }
  
-	 // 5) Gather runtime info
+	 // Gather runtime info
 	 clientPod, err := getPodName(ns, "app=fortio-client")
 	 if err != nil {
 		 t.Fatalf("could not get client pod: %v", err)
@@ -219,7 +208,7 @@
 		 t.Fatalf("could not get client IP: %v", err)
 	 }
  
-	 // 6) Define test scenarios
+	 // Define test scenarios
 	 tests := []struct {
 		 name        string
 		 policyName  string
@@ -230,8 +219,7 @@
 		 {
 			 name:       "DenyByDstPort",
 			 policyName: "deny-by-dstport",
-			 manifest: `
- apiVersion: security.istio.io/v1beta1
+			 manifest: `apiVersion: security.istio.io/v1beta1
  kind: AuthorizationPolicy
  metadata:
    name: deny-by-dstport
@@ -243,16 +231,14 @@
    rules:
    - to:
 	 - operation:
-		 ports: ["8080"]
- `,
+		 ports: ["8080"]`,
 			 target:      fmt.Sprintf("%s:8080", serverIP),
 			 logSnippets: []string{"port 8080", "action: DENY"},
 		 },
 		 {
 			 name:       "DenyBySrcIP",
 			 policyName: "deny-by-srcip",
-			 manifest: fmt.Sprintf(`
- apiVersion: security.istio.io/v1beta1
+			 manifest: fmt.Sprintf(`apiVersion: security.istio.io/v1beta1
  kind: AuthorizationPolicy
  metadata:
    name: deny-by-srcip
@@ -264,16 +250,14 @@
    rules:
    - from:
 	 - source:
-		 ipBlocks: ["%s"]
- `, clientIP),
+		 ipBlocks: ["%s"]`, clientIP),
 			 target:      fmt.Sprintf("%s:8080", serverIP),
 			 logSnippets: []string{"IPv4 match srcip", "action: DENY"},
 		 },
 		 {
 			 name:       "DenyByDstIP",
 			 policyName: "deny-by-dstip",
-			 manifest: fmt.Sprintf(`
- apiVersion: security.istio.io/v1beta1
+			 manifest: fmt.Sprintf(`apiVersion: security.istio.io/v1beta1
  kind: AuthorizationPolicy
  metadata:
    name: deny-by-dstip
@@ -285,8 +269,7 @@
    rules:
    - when:
 	 - key: destination.ip
-	   values: ["%s"]
- `, serverIP),
+	   values: ["%s"]`, serverIP),
 			 target:      fmt.Sprintf("%s:8080", serverIP),
 			 logSnippets: []string{"IPv4 match dstip", "action: DENY"},
 		 },
@@ -304,11 +287,11 @@
 			 }
 			 defer deleteResource("authorizationpolicy", tc.policyName)
  
-			 // Allow policy to propagate
+			 // Allow propagation
 			 t.Log("Sleeping 3s for policy propagation")
 			 time.Sleep(3 * time.Second)
  
-			 // Execute Fortio load; expect Code -1 (denied)
+			 // Execute Fortio load; expect Code -1
 			 cmdArgs := []string{"exec", "-n", ns, clientPod, "--",
 				 "fortio", "load", "-c", "1", "-n", "1", "-qps", "0", tc.target}
 			 t.Logf("Running Fortio: kubectl %s", strings.Join(cmdArgs, " "))
@@ -322,7 +305,7 @@
 				 t.Fatalf("expected denied (Code -1), got:\n%s", output)
 			 }
  
-			 // Check KMesh logs
+			 // Retrieve KMesh logs
 			 t.Log("Retrieving KMesh daemon pod name")
 			 podNameBytes, err := osExec.Command("kubectl", "get", "pods", "-n", "kmesh-system",
 				 "-o", "jsonpath={.items[0].metadata.name}").CombinedOutput()
