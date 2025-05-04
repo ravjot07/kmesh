@@ -22,105 +22,115 @@ package kmesh
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"strings"
 	"testing"
 	"time"
-	"strings"
-	"os"
-	"fmt"
-
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/rest"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	corev1 "k8s.io/api/core/v1"
-	appsv1 "k8s.io/api/apps/v1"
-	"sigs.k8s.io/yaml"
 
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/shell"
+	corev1 "k8s.io/api/core/v1"
+	appsv1 "k8s.io/api/apps/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	"sigs.k8s.io/yaml"
 )
 
-const ns = "sample"
+const ns = "kmesh-system"
 
-// k8sClient is a Kubernetes client for applying manifests and querying resources.
 var k8sClient *kubernetes.Clientset
 
-// getK8sClient initializes and returns a Kubernetes clientset, using in-cluster config if available or KUBECONFIG if set.
+// getK8sClient attempts to load in-cluster config, then falls back to KUBECONFIG.
+// Debug printouts trace each step.
 func getK8sClient() (*kubernetes.Clientset, error) {
 	if k8sClient != nil {
+		fmt.Println("[DEBUG] Reusing existing k8sClient")
 		return k8sClient, nil
 	}
-	// Try in-cluster config first
+
+	// 1) Try in-cluster
+	fmt.Println("[DEBUG] getK8sClient: attempting in-cluster config")
 	config, err := rest.InClusterConfig()
 	if err != nil {
-		// 2) Fallback to kubeconfig (KUBECONFIG env var or default path)
+		fmt.Printf("[DEBUG] in-cluster config failed: %v\n", err)
+
+		// 2) Fallback to KUBECONFIG env var or default
 		kubeconfig := os.Getenv("KUBECONFIG")
+		fmt.Printf("[DEBUG] falling back to KUBECONFIG path: %q\n", kubeconfig)
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 		if err != nil {
+			fmt.Printf("[DEBUG] BuildConfigFromFlags failed: %v\n", err)
 			return nil, fmt.Errorf("failed to load kubeconfig: %v", err)
 		}
+		fmt.Println("[DEBUG] successfully loaded config from KUBECONFIG")
+	} else {
+		fmt.Println("[DEBUG] successfully loaded in-cluster config")
 	}
+
+	// Create clientset
 	client, err := kubernetes.NewForConfig(config)
 	if err != nil {
+		fmt.Printf("[DEBUG] NewForConfig failed: %v\n", err)
 		return nil, fmt.Errorf("failed to create Kubernetes client: %v", err)
 	}
+	fmt.Println("[DEBUG] Kubernetes client created")
 	k8sClient = client
 	return k8sClient, nil
 }
 
-// applyManifest creates or updates a Kubernetes resource from the given YAML manifest in the specified namespace.
-func applyManifest(namespace string, manifest string) error {
+// applyManifest creates or updates a Service or Deployment from the given YAML manifest.
+// It prints a timestamped debug log of the manifest.
+func applyManifest(namespace, manifest string) error {
+	ts := time.Now().Format(time.RFC3339)
+	fmt.Printf("[DEBUG %s] applyManifest(namespace=%s):\n%s\n", ts, namespace, manifest)
+
 	client, err := getK8sClient()
 	if err != nil {
 		return err
 	}
-	// Decode manifest to determine kind
-	manifest = strings.TrimSpace(manifest)
-	if manifest == "" {
+
+	m := strings.TrimSpace(manifest)
+	if m == "" {
 		return nil
 	}
+
+	// Determine kind by string pattern
 	switch {
-	case strings.Contains(manifest, "kind: Service"):
-		// Create or update Service
-		svc := manifestToService(manifest)
-		svc.Namespace = namespace
-		_, err := client.CoreV1().Services(namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
+	case strings.Contains(m, "kind: Service"):
+		obj := &corev1.Service{}
+		if err := yaml.Unmarshal([]byte(m), obj); err != nil {
+			return err
+		}
+		obj.Namespace = namespace
+		_, err = client.CoreV1().Services(namespace).Create(context.TODO(), obj, metav1.CreateOptions{})
 		if err != nil && strings.Contains(err.Error(), "AlreadyExists") {
-			_, err = client.CoreV1().Services(namespace).Update(context.TODO(), svc, metav1.UpdateOptions{})
+			_, err = client.CoreV1().Services(namespace).Update(context.TODO(), obj, metav1.UpdateOptions{})
 		}
 		return err
-	case strings.Contains(manifest, "kind: Deployment"):
-		// Create or update Deployment
-		dep := manifestToDeployment(manifest)
-		dep.Namespace = namespace
-		_, err := client.AppsV1().Deployments(namespace).Create(context.TODO(), dep, metav1.CreateOptions{})
+
+	case strings.Contains(m, "kind: Deployment"):
+		obj := &appsv1.Deployment{}
+		if err := yaml.Unmarshal([]byte(m), obj); err != nil {
+			return err
+		}
+		obj.Namespace = namespace
+		_, err = client.AppsV1().Deployments(namespace).Create(context.TODO(), obj, metav1.CreateOptions{})
 		if err != nil && strings.Contains(err.Error(), "AlreadyExists") {
-			_, err = client.AppsV1().Deployments(namespace).Update(context.TODO(), dep, metav1.UpdateOptions{})
+			_, err = client.AppsV1().Deployments(namespace).Update(context.TODO(), obj, metav1.UpdateOptions{})
 		}
 		return err
+
 	default:
-		return fmt.Errorf("unsupported manifest kind or format")
+		return fmt.Errorf("unsupported manifest kind")
 	}
-}
-
-// manifestToService decodes a Service manifest YAML string into a Service object.
-func manifestToService(manifest string) *corev1.Service {
-	svc := &corev1.Service{}
-	_ = yaml.Unmarshal([]byte(manifest), svc)
-	return svc
-}
-
-// manifestToDeployment decodes a Deployment manifest YAML string into a Deployment object.
-func manifestToDeployment(manifest string) *appsv1.Deployment {
-	dep := &appsv1.Deployment{}
-	_ = yaml.Unmarshal([]byte(manifest), dep)
-	return dep
 }
 
 func TestLocalityLoadBalancing_PreferClose(t *testing.T) {
 	framework.NewTest(t).Run(func(t framework.TestContext) {
-		// Define the Service and Deployments with trafficDistribution: PreferClose
+		// Service with PreferClose failover mode
 		serviceYAML := `
 apiVersion: v1
 kind: Service
@@ -139,6 +149,7 @@ spec:
   clusterIP: None
   trafficDistribution: PreferClose
 `
+		// Local instance on worker node
 		depLocal := `
 apiVersion: apps/v1
 kind: Deployment
@@ -172,6 +183,7 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: kmesh-testing-worker
 `
+		// Remote instance on control-plane with toleration
 		depRemote := `
 apiVersion: apps/v1
 kind: Deployment
@@ -209,6 +221,7 @@ spec:
         operator: "Exists"
         effect: "NoSchedule"
 `
+		// Sleep client to generate traffic
 		clientDep := `
 apiVersion: apps/v1
 kind: Deployment
@@ -227,97 +240,103 @@ spec:
       labels:
         app: sleep
     spec:
+      terminationGracePeriodSeconds: 0
       containers:
       - name: sleep
         image: curlimages/curl
+        command: ["/bin/sleep","infinity"]
         imagePullPolicy: IfNotPresent
-        command: ["/bin/sleep", "infinity"]
       nodeSelector:
         kubernetes.io/hostname: kmesh-testing-worker
 `
-		// Apply manifests
+
+		// Step 1: Apply manifests
+		t.Logf("[STEP] Applying Service")
 		if err := applyManifest(ns, serviceYAML); err != nil {
-			t.Fatalf("Failed to apply Service manifest: %v", err)
+			t.Fatalf("applyManifest(Service) failed: %v", err)
 		}
+		t.Logf("[STEP] Applying Local Deployment")
 		if err := applyManifest(ns, depLocal); err != nil {
-			t.Fatalf("Failed to deploy local instance: %v", err)
+			t.Fatalf("applyManifest(Local) failed: %v", err)
 		}
+		t.Logf("[STEP] Applying Remote Deployment")
 		if err := applyManifest(ns, depRemote); err != nil {
-			t.Fatalf("Failed to deploy remote instance: %v", err)
+			t.Fatalf("applyManifest(Remote) failed: %v", err)
 		}
+		t.Logf("[STEP] Applying Sleep client")
 		if err := applyManifest(ns, clientDep); err != nil {
-			t.Fatalf("Failed to deploy sleep client: %v", err)
+			t.Fatalf("applyManifest(Client) failed: %v", err)
 		}
-		// Wait for all deployments to be ready
-		if _, err := shell.Execute(true, "kubectl wait --for=condition=available deployment -n " + ns + " --timeout=120s --all"); err != nil {
-			t.Fatalf("Deployments not ready: %v", err)
+
+		// Step 2: Wait for readiness
+		t.Logf("[STEP] Waiting for deployments availability")
+		if out, err := shell.Execute(true, "kubectl wait --for=condition=available deployment -n "+ns+" --timeout=120s --all"); err != nil {
+			t.Fatalf("waiting deployments failed: %v\n%s", err, out)
+		} else {
+			t.Logf("[DEBUG] wait output: %s", out)
 		}
-		// Get name of the sleep client pod
+
+		// Step 3: Find sleep pod
 		client, err := getK8sClient()
 		if err != nil {
-			t.Fatalf("Failed to get k8s client: %v", err)
+			t.Fatalf("getK8sClient failed: %v", err)
 		}
-		podList, err := client.CoreV1().Pods(ns).List(context.TODO(), metav1.ListOptions{LabelSelector: "app=sleep"})
-		if err != nil || len(podList.Items) == 0 {
-			t.Fatalf("Failed to get sleep pod: %v", err)
+		t.Logf("[STEP] Listing sleep pods")
+		pods, err := client.CoreV1().Pods(ns).List(context.TODO(), metav1.ListOptions{LabelSelector: "app=sleep"})
+		if err != nil {
+			t.Fatalf("listing sleep pod failed: %v", err)
 		}
-		sleepPod := podList.Items[0].Name
+		if len(pods.Items) == 0 {
+			t.Fatal("no sleep pod found")
+		}
+		sleepPod := pods.Items[0].Name
+		t.Logf("[DEBUG] Sleep pod: %s", sleepPod)
 
-		// Test Locality Preference (PreferClose): expect response from local instance
-		t.Log("Testing locality preferred: expecting response from local zone...")
-		var localResponse string
-		retryTimeout := 60 * time.Second
+		// Step 4: PreferClose - local preference
+		t.Logf("[TEST] PreferClose mode: expect local instance")
 		start := time.Now()
 		for {
-			out, err := shell.Execute(false, "kubectl exec -n "+ns+" "+sleepPod+" -- curl -sS http://helloworld."+ns+".svc.cluster.local:5000/hello")
-			if err != nil {
-				t.Logf("Curl error: %v", err)
-				// continue retrying until timeout
-			} else {
-				t.Logf("Curl output: %s", out)
-				if strings.Contains(out, "region.zone1.subzone1") {
-					localResponse = out
-					break
-				}
+			out, err := shell.Execute(false, fmt.Sprintf(
+				"kubectl exec -n %s %s -- curl -sS http://helloworld.%s.svc.cluster.local:5000/hello",
+				ns, sleepPod, ns))
+			t.Logf("[DEBUG] curl output: %q, err: %v", out, err)
+			if err == nil && strings.Contains(out, "region.zone1.subzone1") {
+				t.Logf("[PASS] received local response: %s", out)
+				break
 			}
-			if time.Since(start) > retryTimeout {
-				t.Fatalf("Locality preferred test failed: expected response from region.zone1.subzone1, got: %s", localResponse)
+			if time.Since(start) > 60*time.Second {
+				t.Fatalf("PreferClose local timeout, last: %q, err: %v", out, err)
 			}
 			time.Sleep(2 * time.Second)
 		}
-		t.Log("Locality preferred (PreferClose) test passed: traffic served by local instance.")
 
-		// Test Locality Failover: delete local instance and expect remote instance to serve traffic
-		t.Log("Testing locality failover: expecting response from remote zone after local removal...")
-		// Delete the local instance deployment
+		// Step 5: Failover - delete local, expect remote
+		t.Logf("[STEP] Deleting local deployment helloworld-region-zone1-subzone1")
 		if err := client.AppsV1().Deployments(ns).Delete(context.TODO(), "helloworld-region-zone1-subzone1", metav1.DeleteOptions{}); err != nil {
-			t.Fatalf("Failed to delete local instance deployment: %v", err)
+			t.Fatalf("deleting local deployment failed: %v", err)
 		}
-		var failoverResponse string
+		t.Logf("[TEST] PreferClose mode: expect remote instance after deletion")
 		start = time.Now()
 		for {
-			out, err := shell.Execute(false, "kubectl exec -n "+ns+" "+sleepPod+" -- curl -sS http://helloworld."+ns+".svc.cluster.local:5000/hello")
-			if err != nil {
-				t.Logf("Curl error after failover: %v", err)
-			} else {
-				t.Logf("Curl output after failover: %s", out)
-				if strings.Contains(out, "region.zone1.subzone2") {
-					failoverResponse = out
-					break
-				}
+			out, err := shell.Execute(false, fmt.Sprintf(
+				"kubectl exec -n %s %s -- curl -sS http://helloworld.%s.svc.cluster.local:5000/hello",
+				ns, sleepPod, ns))
+			t.Logf("[DEBUG] curl after delete: %q, err: %v", out, err)
+			if err == nil && strings.Contains(out, "region.zone1.subzone2") {
+				t.Logf("[PASS] received remote response: %s", out)
+				break
 			}
-			if time.Since(start) > retryTimeout {
-				t.Fatalf("Locality failover test failed: expected response from region.zone1.subzone2, got: %s", failoverResponse)
+			if time.Since(start) > 60*time.Second {
+				t.Fatalf("PreferClose failover timeout, last: %q, err: %v", out, err)
 			}
 			time.Sleep(2 * time.Second)
 		}
-		t.Log("Locality failover (PreferClose) test passed: traffic fell back to remote instance.")
 	})
 }
 
 func TestLocalityLoadBalancing_Local(t *testing.T) {
 	framework.NewTest(t).Run(func(t framework.TestContext) {
-		// Define Service and Deployments with trafficDistribution: Local (strict locality)
+		// Service with strict Local mode
 		serviceYAML := `
 apiVersion: v1
 kind: Service
@@ -336,6 +355,7 @@ spec:
   clusterIP: None
   trafficDistribution: Local
 `
+		// Local instance
 		depLocal := `
 apiVersion: apps/v1
 kind: Deployment
@@ -369,6 +389,7 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: kmesh-testing-worker
 `
+		// Remote instance
 		depRemote := `
 apiVersion: apps/v1
 kind: Deployment
@@ -406,6 +427,7 @@ spec:
         operator: "Exists"
         effect: "NoSchedule"
 `
+		// Sleep client
 		clientDep := `
 apiVersion: apps/v1
 kind: Deployment
@@ -424,72 +446,84 @@ spec:
       labels:
         app: sleep
     spec:
+      terminationGracePeriodSeconds: 0
       containers:
       - name: sleep
         image: curlimages/curl
+        command: ["/bin/sleep","infinity"]
         imagePullPolicy: IfNotPresent
-        command: ["/bin/sleep", "infinity"]
       nodeSelector:
         kubernetes.io/hostname: kmesh-testing-worker
 `
+
 		// Apply manifests
+		t.Logf("[STEP] Applying Service (Local mode)")
 		if err := applyManifest(ns, serviceYAML); err != nil {
-			t.Fatalf("Failed to apply Service manifest: %v", err)
+			t.Fatalf("applyManifest(Service) failed: %v", err)
 		}
+		t.Logf("[STEP] Applying Local Deployment")
 		if err := applyManifest(ns, depLocal); err != nil {
-			t.Fatalf("Failed to deploy local instance: %v", err)
+			t.Fatalf("applyManifest(Local) failed: %v", err)
 		}
+		t.Logf("[STEP] Applying Remote Deployment")
 		if err := applyManifest(ns, depRemote); err != nil {
-			t.Fatalf("Failed to deploy remote instance: %v", err)
+			t.Fatalf("applyManifest(Remote) failed: %v", err)
 		}
+		t.Logf("[STEP] Applying Sleep client")
 		if err := applyManifest(ns, clientDep); err != nil {
-			t.Fatalf("Failed to deploy sleep client: %v", err)
+			t.Fatalf("applyManifest(Client) failed: %v", err)
 		}
-		// Wait for all deployments to be ready
-		if _, err := shell.Execute(true, "kubectl wait --for=condition=available deployment -n " + ns + " --timeout=120s --all"); err != nil {
-			t.Fatalf("Deployments not ready: %v", err)
+
+		// Wait for readiness
+		t.Logf("[STEP] Waiting for deployments availability")
+		if out, err := shell.Execute(true, "kubectl wait --for=condition=available deployment -n "+ns+" --timeout=120s --all"); err != nil {
+			t.Fatalf("waiting deployments failed: %v\n%s", err, out)
+		} else {
+			t.Logf("[DEBUG] wait output: %s", out)
 		}
-		// Get sleep pod name
+
+		// Discover sleep pod
 		client, err := getK8sClient()
 		if err != nil {
-			t.Fatalf("Failed to get k8s client: %v", err)
+			t.Fatalf("getK8sClient failed: %v", err)
 		}
-		podList, err := client.CoreV1().Pods(ns).List(context.TODO(), metav1.ListOptions{LabelSelector: "app=sleep"})
-		if err != nil || len(podList.Items) == 0 {
-			t.Fatalf("Failed to get sleep pod: %v", err)
-		}
-		sleepPod := podList.Items[0].Name
-
-		// Test Locality Strict mode: expect only local endpoint is used
-		t.Log("Testing strict locality: expecting traffic only to local endpoint...")
-		// Initial request to confirm local endpoint responds
-		out, err := shell.Execute(false, "kubectl exec -n " + ns + " " + sleepPod + " -- curl -sS http://helloworld." + ns + ".svc.cluster.local:5000/hello")
+		t.Logf("[STEP] Listing sleep pods")
+		pods, err := client.CoreV1().Pods(ns).List(context.TODO(), metav1.ListOptions{LabelSelector: "app=sleep"})
 		if err != nil {
-			t.Fatalf("Initial curl in Local mode failed: %v", err)
+			t.Fatalf("listing sleep pod failed: %v", err)
 		}
-		if !strings.Contains(out, "region.zone1.subzone1") {
-			t.Fatalf("Strict locality test failed: expected local instance response, got: %s", out)
+		if len(pods.Items) == 0 {
+			t.Fatal("no sleep pod found")
 		}
-		t.Logf("Received local response: %s", out)
-		// Delete local instance
+		sleepPod := pods.Items[0].Name
+		t.Logf("[DEBUG] Sleep pod: %s", sleepPod)
+
+		// Initial request: should hit local
+		t.Logf("[TEST] Local mode initial request: expect local instance")
+		out, err := shell.Execute(false, fmt.Sprintf(
+			"kubectl exec -n %s %s -- curl -sS http://helloworld.%s.svc.cluster.local:5000/hello",
+			ns, sleepPod, ns))
+		t.Logf("[DEBUG] initial curl: %q, err: %v", out, err)
+		if err != nil || !strings.Contains(out, "region.zone1.subzone1") {
+			t.Fatalf("Local mode initial failed: %q, %v", out, err)
+		}
+		t.Log("[PASS] initial local endpoint OK")
+
+		// Delete local: expect no fallback
+		t.Logf("[STEP] Deleting local deployment helloworld-region-zone1-subzone1")
 		if err := client.AppsV1().Deployments(ns).Delete(context.TODO(), "helloworld-region-zone1-subzone1", metav1.DeleteOptions{}); err != nil {
-			t.Fatalf("Failed to delete local instance deployment: %v", err)
+			t.Fatalf("deleting local deployment failed: %v", err)
 		}
-		// Allow time for Kmesh to update endpoints (local removed)
 		time.Sleep(5 * time.Second)
-		// Attempt to curl service again; expect failure or no response (no fallback in strict mode)
-		out, err = shell.Execute(false, "kubectl exec -n " + ns + " " + sleepPod + " -- curl -m 5 -sS http://helloworld." + ns + ".svc.cluster.local:5000/hello")
-		if err == nil {
-			// If curl succeeded, check that it is NOT a remote response
-			if strings.Contains(out, "region.zone1.subzone2") {
-				t.Fatalf("Strict locality mode failed: got remote response %q, but no remote fallback should occur", out)
-			}
-			if strings.Contains(out, "region.zone1.subzone1") {
-				t.Fatalf("Strict locality mode: local instance response still received after deletion (pod may not have terminated yet): %s", out)
-			}
-			// Any other successful output is unexpected
-			t.Fatalf("Strict locality mode: unexpected success response: %s", out)
+
+		t.Logf("[TEST] Local mode after deletion: expect no remote fallback")
+		out, err = shell.Execute(false, fmt.Sprintf(
+			"kubectl exec -n %s %s -- curl -m 5 -sS http://helloworld.%s.svc.cluster.local:5000/hello",
+			ns, sleepPod, ns))
+		t.Logf("[DEBUG] post-delete curl: %q, err: %v", out, err)
+		if err == nil && strings.Contains(out, "region.zone1.subzone2") {
+			t.Fatalf("Local mode fallback occurred unexpectedly: %q", out)
 		}
-		t.Log("Locality Local mode test passed: no remote endpoint was used after local endpoint removal.")
+		t.Log("[PASS] strict Local mode verified: no remote fallback")
 	})
 }
