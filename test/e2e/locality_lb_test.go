@@ -39,7 +39,7 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-const ns = "kmesh-system"
+const ns = "sample"
 
 var k8sClient *kubernetes.Clientset
 
