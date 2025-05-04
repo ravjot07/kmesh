@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -118,7 +119,7 @@ func applyManifest(namespace, manifest string) error {
 	return fmt.Errorf("unsupported manifest kind:\n%s", m)
 }
 
-// ensureNamespace makes sure the test namespace exists, using TestContext for logging.
+// ensureNamespace makes sure the test namespace exists.
 func ensureNamespace(ctx framework.TestContext) {
 	cs, err := getK8sClient()
 	if err != nil {
@@ -355,7 +356,7 @@ spec:
   clusterIP: None
   trafficDistribution: Local
 `
-		// Reuse the same deployments and client as above
+		// Local, Remote, and Sleep manifests
 		depLocal := `
 apiVersion: apps/v1
 kind: Deployment
@@ -467,8 +468,10 @@ spec:
 		}
 
 		// Wait for readiness
-		shell.Execute(true, fmt.Sprintf("kubectl wait --for=condition=ready pod -l app=helloworld -n %s --timeout=120s", ns))
-		shell.Execute(true, fmt.Sprintf("kubectl wait --for=condition=ready pod -l app=sleep -n %s --timeout=120s", ns))
+		shell.Execute(true, fmt.Sprintf(
+			"kubectl wait --for=condition=ready pod -l app=helloworld -n %s --timeout=120s", ns))
+		shell.Execute(true, fmt.Sprintf(
+			"kubectl wait --for=condition=ready pod -l app=sleep -n %s --timeout=120s", ns))
 
 		// Identify sleep pod
 		cs, err := getK8sClient()
