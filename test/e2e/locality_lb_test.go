@@ -54,13 +54,13 @@ func getK8sClient() (*kubernetes.Clientset, error) {
 	var config *rest.Config
 	var err error
 	// Try in-cluster config first
-	config, err = rest.InClusterConfig()
+	config, err := rest.InClusterConfig()
 	if err != nil {
-		// Fallback to kubeconfig from environment
-		kubeConfigPath := os.Getenv("KUBECONFIG")
-		config, err = clientcmd.BuildConfigFromFlags("", kubeConfigPath)
+		// 2) Fallback to kubeconfig (KUBECONFIG env var or default path)
+		kubeconfig := os.Getenv("KUBECONFIG")
+		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get Kubernetes config: %v", err)
+			return nil, fmt.Errorf("failed to load kubeconfig: %v", err)
 		}
 	}
 	client, err := kubernetes.NewForConfig(config)
