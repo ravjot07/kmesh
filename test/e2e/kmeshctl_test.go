@@ -92,7 +92,7 @@ func findKmeshPod(t *testing.T) string {
 }
 
 // TestMain ensures Kmesh pods are up before any tests run.
-func TestMain(m *testing.M) {
+func TestMain_kmeshctl(m *testing.M) {
 	// 1) Wait for all Kmesh pods to be Ready.
 	waitCmd := exec.Command("kubectl", "-n", kmeshNamespace, "wait",
 		"--for=condition=Ready", "pod", "-l", "app=kmesh",
