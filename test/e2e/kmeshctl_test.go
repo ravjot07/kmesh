@@ -311,7 +311,6 @@ func genRandomKey(t *testing.T) string {
 
 func TestKmeshctlSecret(t *testing.T) {
 	const secretName = "kmesh-ipsec"
-	// 1) ensure no pre-existing secret
 	deleteSecret(t, secretName, kmeshNamespace)
 
 	key1 := genRandomKey(t)
