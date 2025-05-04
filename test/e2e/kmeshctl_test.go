@@ -91,24 +91,27 @@ func findKmeshPod(t *testing.T) string {
 	return name
 }
 
-// TestMain ensures Kmesh pods are up before any tests run.
-func TestKmeshMain(m *testing.M) {
-	// 1) Wait for all Kmesh pods to be Ready.
-	waitCmd := exec.Command("kubectl", "-n", kmeshNamespace, "wait",
+// Package‐level init ensures Kmesh is ready before any tests run.
+func init() {
+	// 1) Wait up to 2 minutes for all Kmesh pods to become Ready.
+	wait := exec.Command("kubectl", "-n", kmeshNamespace, "wait",
 		"--for=condition=Ready", "pod", "-l", "app=kmesh",
 		"--timeout=2m",
 	)
-	if out, err := waitCmd.CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "❌ timeout waiting for kmesh pods: %v\n%s\n",
-			err, string(out))
-		os.Exit(1)
+	if out, err := wait.CombinedOutput(); err != nil {
+		panic(fmt.Sprintf("❌ timed out waiting for Kmesh pods: %v\n%s",
+			err, string(out)))
 	}
 
-	// 2) Capture one pod name for per-pod commands.
-	//    We know at least one pod exists and is Ready.
-	podName = findKmeshPod(&testing.T{})
-
-	os.Exit(m.Run())
+	// 2) Retrieve the name of the first Ready Kmesh pod.
+	getPod := exec.Command("kubectl", "-n", kmeshNamespace, "get", "pods",
+		"-l", "app=kmesh", "-o", "jsonpath={.items[0].metadata.name}")
+	out, err := getPod.Output()
+	if err != nil || len(out) == 0 {
+		panic(fmt.Sprintf("❌ failed to find any Kmesh pod: %v\n%s",
+			err, string(out)))
+	}
+	kmeshPodName = strings.TrimSpace(string(out))
 }
 
 // --- Version tests ---
