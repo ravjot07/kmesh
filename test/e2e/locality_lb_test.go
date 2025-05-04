@@ -15,538 +15,314 @@ pods via nodeSelector. DNS races are avoided by fetching the
 ClusterIP and using curl --resolve (with IPv6 brackets).
 */
 
+//go:build integ
+// +build integ
+
+/*
+   Integration tests for Kmesh locality‑aware load‑balancing
+
+   ──  Copyright © 2025 Kmesh Authors  ──────────────────────────────────────
+*/
+
 package kmesh
 
 import (
-    "fmt"
-    "os"
-    "path/filepath"
-    "strings"
-    "testing"
-    "time"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
 
-    "istio.io/istio/pkg/test/framework"
-    "istio.io/istio/pkg/test/shell"
-    "istio.io/istio/pkg/test/util/retry"
+	"istio.io/istio/pkg/test/framework"
+	"istio.io/istio/pkg/test/shell"
+	"istio.io/istio/pkg/test/util/retry"
 )
 
-// runCommand shells out and fatals on error. Logs command + output.
-func runCommand(ctx framework.TestContext, cmd string) string {
-    out, err := shell.Execute(true, cmd)
-    if err != nil {
-        ctx.Fatalf("Command %q failed: %v\n%s", cmd, err, out)
-    }
-    ctx.Logf(">>> Command succeeded: %s\n%s", cmd, out)
-    return out
+/* ──────────────────────────── helpers ──────────────────────────── */
+
+func run(ctx framework.TestContext, cmd string) string {
+	out, err := shell.Execute(true, cmd)
+	if err != nil {
+		ctx.Fatalf("cmd %q failed: %v\n%s", cmd, err, out)
+	}
+	ctx.Logf(">>> %s\n%s", cmd, out)
+	return out
 }
 
-// applyManifest writes mani to a temp file and kubectl-applies it with debug logs.
-func applyManifest(ctx framework.TestContext, ns, mani string) {
-    ctx.Logf(">>> Applying to namespace %q manifest:\n%s", ns, mani)
-    dir := ctx.CreateTmpDirectoryOrFail("kmesh-lb")
-    path := filepath.Join(dir, "m.yaml")
-    if err := os.WriteFile(path, []byte(mani), 0644); err != nil {
-        ctx.Fatalf("WriteFile(%s) failed: %v", path, err)
-    }
-    content, _ := os.ReadFile(path)
-    ctx.Logf(">>> On-disk manifest at %s:\n%s", path, content)
-    runCommand(ctx, fmt.Sprintf("kubectl apply -n %s -f %s", ns, path))
+func apply(ctx framework.TestContext, ns, yaml string) {
+	dir := ctx.CreateTmpDirectoryOrFail("lb")
+	f := filepath.Join(dir, "m.yaml")
+	if err := os.WriteFile(f, []byte(yaml), 0644); err != nil {
+		ctx.Fatalf("write %s: %v", f, err)
+	}
+	ctx.Logf(">>> Applying in %q:\n%s", ns, yaml)
+	run(ctx, fmt.Sprintf("kubectl apply -n %s -f %s", ns, f))
 }
 
-// getClusterIP fetches the Service's ClusterIP, bracketed for IPv6.
-func getClusterIP(ctx framework.TestContext, ns, svc string) string {
-    ip := runCommand(ctx, fmt.Sprintf(
-        "kubectl get svc %s -n %s -o jsonpath={.spec.clusterIP}", svc, ns))
-    if ip == "" {
-        ctx.Fatalf("Empty ClusterIP for %s/%s", ns, svc)
-    }
-    if strings.Contains(ip, ":") {
-        ip = "[" + ip + "]"
-    }
-    ctx.Logf("ClusterIP for %s/%s = %s", ns, svc, ip)
-    return ip
+func waitDep(ctx framework.TestContext, ns, name string) {
+	run(ctx, fmt.Sprintf("kubectl wait --for=condition=available deployment/%s -n %s --timeout=120s", name, ns))
 }
 
-// getSleepPod returns the name of the sleep pod in ns.
-func getSleepPod(ctx framework.TestContext, ns string) string {
-    pod := runCommand(ctx, fmt.Sprintf(
-        "kubectl get pod -n %s -l app=sleep -o jsonpath={.items[0].metadata.name}", ns))
-    if pod == "" {
-        ctx.Fatalf("No sleep pod found in %s", ns)
-    }
-    ctx.Logf("sleep pod = %s", pod)
-    return pod
+func clusterIP(ctx framework.TestContext, ns string) string {
+	ip := run(ctx, fmt.Sprintf("kubectl get svc helloworld -n %s -o=jsonpath={.spec.clusterIP}", ns))
+	if strings.Contains(ip, ":") {
+		ip = "[" + ip + "]"
+	}
+	return ip
 }
 
-// waitForDeployment waits until deployment/name in ns is Available.
-func waitForDeployment(ctx framework.TestContext, ns, name string) {
-    runCommand(ctx, fmt.Sprintf(
-        "kubectl wait --for=condition=available deployment/%s -n %s --timeout=120s",
-        name, ns))
+func sleepPod(ctx framework.TestContext, ns string) string {
+	return run(ctx, fmt.Sprintf("kubectl get pod -n %s -l app=sleep -o=jsonpath={.items[0].metadata.name}", ns))
 }
 
-// curlHello execs into sleep pod and curls the service via --resolve.
-func curlHello(ctx framework.TestContext, ns, pod, fqdn, ip string) (string, error) {
-    cmd := fmt.Sprintf(
-        "kubectl exec -n %s %s -- curl -sSL -v --resolve %s:5000:%s http://%s:5000/hello",
-        ns, pod, fqdn, ip, fqdn)
-    return shell.Execute(false, cmd)
+func curl(ctx framework.TestContext, ns, pod, fqdn, ip string) string {
+	out, _ := shell.Execute(false,
+		fmt.Sprintf("kubectl exec -n %s %s -- curl -sSL --resolve %s:5000:%s http://%s:5000/hello",
+			ns, pod, fqdn, ip, fqdn))
+	return out
 }
 
-// ---------------------------------------------------------------------------
-// Test 1: PreferClose via spec.trafficDistribution
-// ---------------------------------------------------------------------------
-func TestLocality_PreferClose_Spec(t *testing.T) {
-    framework.NewTest(t).Run(func(ctx framework.TestContext) {
-        ctx.Log("=== START TestLocality_PreferClose_Spec ===")
-        ctx.Log("Node labels before labeling:")
-        runCommand(ctx, "kubectl get nodes --show-labels")
-        ctx.Log("Existing Services:")
-        runCommand(ctx, "kubectl get svc -A")
+func labelNodes(ctx framework.TestContext) {
+	run(ctx, "kubectl label node kmesh-testing-worker topology.kubernetes.io/region=region "+
+		"topology.kubernetes.io/zone=zone1 topology.kubernetes.io/subzone=subzone1 --overwrite")
+	run(ctx, "kubectl label node kmesh-testing-control-plane topology.kubernetes.io/region=region "+
+		"topology.kubernetes.io/zone=zone1 topology.kubernetes.io/subzone=subzone2 --overwrite")
+}
 
-        // Label local & remote
-        runCommand(ctx, "kubectl label node kmesh-testing-worker topology.kubernetes.io/region=region topology.kubernetes.io/zone=zone1 topology.kubernetes.io/subzone=subzone1 --overwrite")
-        runCommand(ctx, "kubectl label node kmesh-testing-control-plane topology.kubernetes.io/region=region topology.kubernetes.io/zone=zone1 topology.kubernetes.io/subzone=subzone2 --overwrite")
+/* ─────────────── YAML generators (pure block style) ────────────── */
 
-        ns, svc := "sample-pc-spec", "helloworld"
-        fqdn := svc + "." + ns + ".svc.cluster.local"
-        localVer, remoteVer := "sub1", "sub2"
-
-        runCommand(ctx, "kubectl create namespace "+ns)
-
-        // Service with explicit port+targetPort
-        applyManifest(ctx, ns, fmt.Sprintf(`
+func svcYAML(ns, extraMeta, extraSpec string) string {
+	return fmt.Sprintf(`
 apiVersion: v1
 kind: Service
 metadata:
-  name: %s
+  name: helloworld
   namespace: %s
-  labels: {app: helloworld}
+  labels:
+    app: helloworld
+%s
 spec:
-  selector: {app: helloworld}
+  selector:
+    app: helloworld
   ports:
-    - name: http
-      port: 5000
-      targetPort: 5000
-  trafficDistribution: PreferClose
-`, svc, ns))
+  - name: http
+    port: 5000
+    targetPort: 5000
+%s
+`, ns, extraMeta, extraSpec)
+}
 
-        // Local pod on worker
-        applyManifest(ctx, ns, fmt.Sprintf(`
+func deployYAML(ns, ver, node string) string {
+	return fmt.Sprintf(`
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: helloworld-%s
   namespace: %s
-  labels: {app: helloworld,version:%s}
+  labels:
+    app: helloworld
+    version: %s
 spec:
   replicas: 1
-  selector: {matchLabels:{app:helloworld,version:%s}}
+  selector:
+    matchLabels:
+      app: helloworld
+      version: %s
   template:
-    metadata: {labels:{app:helloworld,version:%s}}
+    metadata:
+      labels:
+        app: helloworld
+        version: %s
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: %s
       containers:
       - name: helloworld
         image: docker.io/istio/examples-helloworld-v1
-        env: [{name:SERVICE_VERSION,value:%s}]
-        ports: [{containerPort:5000}]
-      nodeSelector: {kubernetes.io/hostname:kmesh-testing-worker}
-`, localVer, ns, localVer, localVer, localVer, localVer))
+        env:
+        - name: SERVICE_VERSION
+          value: %s
+        ports:
+        - containerPort: 5000
+`, ver, ns, ver, ver, ver, node, ver)
+}
 
-        // Remote pod on control-plane
-        applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: helloworld-%s
-  namespace: %s
-  labels: {app: helloworld,version:%s}
-spec:
-  replicas: 1
-  selector: {matchLabels:{app:helloworld,version:%s}}
-  template:
-    metadata: {labels:{app:helloworld,version:%s}}
-    spec:
-      containers:
-      - name: helloworld
-        image: docker.io/istio/examples-helloworld-v1
-        env: [{name:SERVICE_VERSION,value:%s}]
-        ports: [{containerPort:5000}]
-      nodeSelector: {kubernetes.io/hostname:kmesh-testing-control-plane}
-`, remoteVer, ns, remoteVer, remoteVer, remoteVer, remoteVer))
-
-        // Sleep client on worker
-        applyManifest(ctx, ns, fmt.Sprintf(`
+func sleepYAML(ns string) string {
+	return fmt.Sprintf(`
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: sleep
   namespace: %s
-  labels: {app: sleep}
+  labels:
+    app: sleep
 spec:
   replicas: 1
-  selector: {matchLabels:{app:sleep}}
+  selector:
+    matchLabels:
+      app: sleep
   template:
-    metadata: {labels:{app:sleep}}
+    metadata:
+      labels:
+        app: sleep
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: kmesh-testing-worker
       containers:
       - name: sleep
         image: curlimages/curl
         command: ["/bin/sleep","infinity"]
-      nodeSelector: {kubernetes.io/hostname:kmesh-testing-worker}
-`, ns))
-
-        waitForDeployment(ctx, ns, "helloworld-"+localVer)
-        waitForDeployment(ctx, ns, "helloworld-"+remoteVer)
-        waitForDeployment(ctx, ns, "sleep")
-
-        ip := getClusterIP(ctx, ns, svc)
-        pod := getSleepPod(ctx, ns)
-
-        ctx.Log("PreferClose(spec): expecting only local")
-        sawLocal := false
-        for i := 0; i < 10; i++ {
-            out, _ := curlHello(ctx, ns, pod, fqdn, ip)
-            ctx.Logf("curl #%d: %s", i+1, out)
-            if strings.Contains(out, remoteVer) {
-                ctx.Fatalf("remote seen before deletion: %q", out)
-            }
-            if strings.Contains(out, localVer) {
-                sawLocal = true
-                break
-            }
-            time.Sleep(2 * time.Second)
-        }
-        if !sawLocal {
-            ctx.Fatalf("never saw local (%s)", localVer)
-        }
-
-        ctx.Log("Deleting local to trigger failover")
-        runCommand(ctx, "kubectl delete deployment helloworld-"+localVer+" -n "+ns)
-        retry.UntilSuccessOrFail(ctx, func() error {
-            out, _ := curlHello(ctx, ns, pod, fqdn, ip)
-            if !strings.Contains(out, remoteVer) {
-                return fmt.Errorf("still not remote: %q", out)
-            }
-            return nil
-        }, retry.Timeout(60*time.Second), retry.Delay(2*time.Second))
-    })
+`, ns)
 }
 
-// ---------------------------------------------------------------------------
-// Test 2: PreferClose via annotation
-// ---------------------------------------------------------------------------
+/* ─────────────────────── Test 1 – PreferClose (spec) ────────────────────── */
+
+func TestLocality_PreferClose_Spec(t *testing.T) {
+	framework.NewTest(t).Run(func(ctx framework.TestContext) {
+		labelNodes(ctx)
+
+		ns := "sample-pc-spec"
+		fqdn := "helloworld." + ns + ".svc.cluster.local"
+		run(ctx, "kubectl create namespace "+ns)
+
+		apply(ctx, ns, svcYAML(ns, "", "  trafficDistribution: PreferClose"))
+		apply(ctx, ns, deployYAML(ns, "sub1", "kmesh-testing-worker"))
+		apply(ctx, ns, deployYAML(ns, "sub2", "kmesh-testing-control-plane"))
+		apply(ctx, ns, sleepYAML(ns))
+
+		for _, d := range []string{"helloworld-sub1", "helloworld-sub2", "sleep"} {
+			waitDep(ctx, ns, d)
+		}
+
+		ip, pod := clusterIP(ctx, ns), sleepPod(ctx, ns)
+
+		// should hit only sub1
+		for i := 0; i < 10; i++ {
+			if out := curl(ctx, ns, pod, fqdn, ip); strings.Contains(out, "sub2") {
+				ctx.Fatalf("remote seen before fail‑over: %s", out)
+			} else if strings.Contains(out, "sub1") {
+				break
+			}
+			time.Sleep(time.Second)
+		}
+
+		run(ctx, "kubectl delete deployment helloworld-sub1 -n "+ns)
+		retry.UntilSuccessOrFail(ctx, func() error {
+			if strings.Contains(curl(ctx, ns, pod, fqdn, ip), "sub2") {
+				return nil
+			}
+			return fmt.Errorf("not remote yet")
+		}, retry.Timeout(60*time.Second), retry.Delay(2*time.Second))
+	})
+}
+
+/* ─────────────────── Test 2 – PreferClose (annotation) ──────────────────── */
+
 func TestLocality_PreferClose_Annotation(t *testing.T) {
-    framework.NewTest(t).Run(func(ctx framework.TestContext) {
-        ctx.Log("=== START TestLocality_PreferClose_Annotation ===")
-        ctx.Log("Node labels before labeling:")
-        runCommand(ctx, "kubectl get nodes --show-labels")
-        ctx.Log("Existing Services:")
-        runCommand(ctx, "kubectl get svc -A")
+	framework.NewTest(t).Run(func(ctx framework.TestContext) {
+		labelNodes(ctx)
+		ns := "sample-pc-annot"
+		fqdn := "helloworld." + ns + ".svc.cluster.local"
+		run(ctx, "kubectl create namespace "+ns)
 
-        // Label local & remote
-        runCommand(ctx, "kubectl label node kmesh-testing-worker topology.kubernetes.io/region=region topology.kubernetes.io/zone=zone1 topology.kubernetes.io/subzone=subzone1 --overwrite")
-        runCommand(ctx, "kubectl label node kmesh-testing-control-plane topology.kubernetes.io/region=region topology.kubernetes.io/zone=zone1 topology.kubernetes.io/subzone=subzone2 --overwrite")
+		meta := "  annotations:\n    networking.istio.io/traffic-distribution: PreferClose\n"
+		apply(ctx, ns, svcYAML(ns, meta, ""))
+		apply(ctx, ns, deployYAML(ns, "sub1", "kmesh-testing-worker"))
+		apply(ctx, ns, deployYAML(ns, "sub2", "kmesh-testing-control-plane"))
+		apply(ctx, ns, sleepYAML(ns))
 
-        ns, svc := "sample-pc-annot", "helloworld"
-        fqdn := svc + "." + ns + ".svc.cluster.local"
-        localVer, remoteVer := "sub1", "sub2"
+		for _, d := range []string{"helloworld-sub1", "helloworld-sub2", "sleep"} {
+			waitDep(ctx, ns, d)
+		}
 
-        runCommand(ctx, "kubectl create namespace "+ns)
+		ip, pod := clusterIP(ctx, ns), sleepPod(ctx, ns)
 
-        // Service with annotation and explicit port/targetPort
-        applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: v1
-kind: Service
-metadata:
-  name: %s
-  namespace: %s
-  annotations:
-    networking.istio.io/traffic-distribution: PreferClose
-  labels: {app: helloworld}
-spec:
-  selector: {app: helloworld}
-  ports:
-    - name: http
-      port: 5000
-      targetPort: 5000
-`, svc, ns))
+		for i := 0; i < 10; i++ {
+			if out := curl(ctx, ns, pod, fqdn, ip); strings.Contains(out, "sub2") {
+				ctx.Fatalf("remote seen before fail‑over: %s", out)
+			} else if strings.Contains(out, "sub1") {
+				break
+			}
+			time.Sleep(time.Second)
+		}
 
-        // Deploy local, remote, sleep (same as spec test)
-        applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata: {name:helloworld-%s,namespace:%s,labels:{app:helloworld,version:%s}}
-spec:
-  replicas:1
-  selector:{matchLabels:{app:helloworld,version:%s}}
-  template:
-    metadata:{labels:{app:helloworld,version:%s}}
-    spec:
-      containers:[{name:helloworld,image:docker.io/istio/examples-helloworld-v1,env:[{name:SERVICE_VERSION,value:%s}],ports:[{containerPort:5000}]}]
-      nodeSelector:{kubernetes.io/hostname:kmesh-testing-worker}
-`, localVer, ns, localVer, localVer, localVer, localVer))
-        applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata: {name:helloworld-%s,namespace:%s,labels:{app:helloworld,version:%s}}
-spec:
-  replicas:1
-  selector:{matchLabels:{app:helloworld,version:%s}}
-  template:
-    metadata:{labels:{app:helloworld,version:%s}}
-    spec:
-      containers:[{name:helloworld,image:docker.io/istio/examples-helloworld-v1,env:[{name:SERVICE_VERSION,value:%s}],ports:[{containerPort:5000}]}]
-      nodeSelector:{kubernetes.io/hostname:kmesh-testing-control-plane}
-`, remoteVer, ns, remoteVer, remoteVer, remoteVer, remoteVer))
-        applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata: {name:sleep,namespace:%s,labels:{app:sleep}}
-spec:
-  replicas:1
-  selector:{matchLabels:{app:sleep}}
-  template:
-    metadata:{labels:{app:sleep}}
-    spec:
-      containers:[{name:sleep,image:curlimages/curl,command:["/bin/sleep","infinity"]}]
-      nodeSelector:{kubernetes.io/hostname:kmesh-testing-worker}
-`, ns))
-
-        waitForDeployment(ctx, ns, "helloworld-"+localVer)
-        waitForDeployment(ctx, ns, "helloworld-"+remoteVer)
-        waitForDeployment(ctx, ns, "sleep")
-
-        ip := getClusterIP(ctx, ns, svc)
-        pod := getSleepPod(ctx, ns)
-
-        ctx.Log("PreferClose(annot): expecting only local")
-        sawLocal := false
-        for i := 0; i < 10; i++ {
-            out, _ := curlHello(ctx, ns, pod, fqdn, ip)
-            ctx.Logf("curl #%d: %s", i+1, out)
-            if strings.Contains(out, remoteVer) {
-                ctx.Fatalf("remote seen before deletion: %q", out)
-            }
-            if strings.Contains(out, localVer) {
-                sawLocal = true
-                break
-            }
-            time.Sleep(2 * time.Second)
-        }
-        if !sawLocal {
-            ctx.Fatalf("never saw local (%s)", localVer)
-        }
-
-        ctx.Log("Deleting local to trigger failover")
-        runCommand(ctx, "kubectl delete deployment helloworld-"+localVer+" -n "+ns)
-        retry.UntilSuccessOrFail(ctx, func() error {
-            out, _ := curlHello(ctx, ns, pod, fqdn, ip)
-            if !strings.Contains(out, remoteVer) {
-                return fmt.Errorf("still not remote: %q", out)
-            }
-            return nil
-        }, retry.Timeout(60*time.Second), retry.Delay(2*time.Second))
-    })
+		run(ctx, "kubectl delete deployment helloworld-sub1 -n "+ns)
+		retry.UntilSuccessOrFail(ctx, func() error {
+			if strings.Contains(curl(ctx, ns, pod, fqdn, ip), "sub2") {
+				return nil
+			}
+			return fmt.Errorf("not remote yet")
+		}, retry.Timeout(60*time.Second), retry.Delay(2*time.Second))
+	})
 }
 
-// ---------------------------------------------------------------------------
-// Test 3: Local strict via internalTrafficPolicy: Local
-// ---------------------------------------------------------------------------
+/* ─────────────── Test 3 – internalTrafficPolicy: Local ─────────────── */
+
 func TestLocality_LocalStrict(t *testing.T) {
-    framework.NewTest(t).Run(func(ctx framework.TestContext) {
-        ctx.Log("=== START TestLocality_LocalStrict ===")
-        ctx.Log("Node labels before labeling:")
-        runCommand(ctx, "kubectl get nodes --show-labels")
-        ctx.Log("Existing Services:")
-        runCommand(ctx, "kubectl get svc -A")
+	framework.NewTest(t).Run(func(ctx framework.TestContext) {
+		labelNodes(ctx)
+		ns := "sample-local"
+		fqdn := "helloworld." + ns + ".svc.cluster.local"
+		run(ctx, "kubectl create namespace "+ns)
 
-        runCommand(ctx, "kubectl label node kmesh-testing-worker topology.kubernetes.io/region=region topology.kubernetes.io/zone=zone1 topology.kubernetes.io/subzone=subzone1 --overwrite")
-        runCommand(ctx, "kubectl label node kmesh-testing-control-plane topology.kubernetes.io/region=region topology.kubernetes.io/zone=zone1 topology.kubernetes.io/subzone=subzone2 --overwrite")
+		apply(ctx, ns, svcYAML(ns, "", "  internalTrafficPolicy: Local"))
+		apply(ctx, ns, deployYAML(ns, "sub1", "kmesh-testing-worker"))
+		apply(ctx, ns, deployYAML(ns, "sub2", "kmesh-testing-control-plane"))
+		apply(ctx, ns, sleepYAML(ns))
 
-        ns, svc := "sample-local", "helloworld"
-        fqdn := svc + "." + ns + ".svc.cluster.local"
-        localVer, remoteVer := "sub1", "sub2"
+		for _, d := range []string{"helloworld-sub1", "helloworld-sub2", "sleep"} {
+			waitDep(ctx, ns, d)
+		}
 
-        runCommand(ctx, "kubectl create namespace "+ns)
-        applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: v1
-kind: Service
-metadata:
-  name: %s
-  namespace: %s
-  labels: {app: helloworld}
-spec:
-  selector: {app: helloworld}
-  ports:
-    - name: http
-      port: 5000
-      targetPort: 5000
-  internalTrafficPolicy: Local
-`, svc, ns))
+		ip, pod := clusterIP(ctx, ns), sleepPod(ctx, ns)
+		if out := curl(ctx, ns, pod, fqdn, ip); !strings.Contains(out, "sub1") {
+			ctx.Fatalf("expected local sub1, got %s", out)
+		}
 
-        applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata: {name:helloworld-%s,namespace:%s,labels:{app:helloworld,version:%s}}
-spec:
-  replicas:1
-  selector:{matchLabels:{app:helloworld,version:%s}}
-  template:
-    metadata:{labels:{app:helloworld,version:%s}}
-    spec:
-      containers:[{name:helloworld,image:docker.io/istio/examples-helloworld-v1,env:[{name:SERVICE_VERSION,value:%s}],ports:[{containerPort:5000}]}]
-      nodeSelector:{kubernetes.io/hostname:kmesh-testing-worker}
-`, localVer, ns, localVer, localVer, localVer, localVer))
-        applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata: {name:helloworld-%s,namespace:%s,labels:{app:helloworld,version:%s}}
-spec:
-  replicas:1
-  selector:{matchLabels:{app:helloworld,version:%s}}
-  template:
-    metadata:{labels:{app:helloworld,version:%s}}
-    spec:
-      containers:[{name:helloworld,image:docker.io/istio/examples-helloworld-v1,env:[{name:SERVICE_VERSION,value:%s}],ports:[{containerPort:5000}]}]
-      nodeSelector:{kubernetes.io/hostname:kmesh-testing-control-plane}
-`, remoteVer, ns, remoteVer, remoteVer, remoteVer, remoteVer))
-        applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata: {name:sleep,namespace:%s,labels:{app:sleep}}
-spec:
-  replicas:1
-  selector:{matchLabels:{app:sleep}}
-  template:
-    metadata:{labels:{app:sleep}}
-    spec:
-      containers:[{name:sleep,image:curlimages/curl,command:["/bin/sleep","infinity"]}]
-      nodeSelector:{kubernetes.io/hostname:kmesh-testing-worker}
-`, ns))
-
-        waitForDeployment(ctx, ns, "helloworld-"+localVer)
-        waitForDeployment(ctx, ns, "helloworld-"+remoteVer)
-        waitForDeployment(ctx, ns, "sleep")
-
-        out, _ := curlHello(ctx, ns, getSleepPod(ctx, ns), fqdn, getClusterIP(ctx, ns, svc))
-        if !strings.Contains(out, localVer) {
-            ctx.Fatalf("Local strict initial: expected %q, got %q", localVer, out)
-        }
-
-        runCommand(ctx, "kubectl delete deployment helloworld-"+localVer+" -n "+ns)
-        time.Sleep(5 * time.Second)
-        if out, err := curlHello(ctx, ns, getSleepPod(ctx, ns), fqdn, getClusterIP(ctx, ns, svc)); err == nil {
-            ctx.Fatalf("Local strict should fail, but got %q", out)
-        }
-    })
+		run(ctx, "kubectl delete deployment helloworld-sub1 -n "+ns)
+		time.Sleep(5 * time.Second)
+		if out := curl(ctx, ns, pod, fqdn, ip); out != "" {
+			ctx.Fatalf("traffic should drop after local deletion, got %s", out)
+		}
+	})
 }
 
-// ---------------------------------------------------------------------------
-// Test 4: Subzone distribution across two fallback pods
-// ---------------------------------------------------------------------------
+/* ─────────────── Test 4 – distribution across two remotes ─────────────── */
+
 func TestLocality_SubzoneDistribution(t *testing.T) {
-    framework.NewTest(t).Run(func(ctx framework.TestContext) {
-        ctx.Log("=== START TestLocality_SubzoneDistribution ===")
-        ctx.Log("Node labels before labeling:")
-        runCommand(ctx, "kubectl get nodes --show-labels")
-        ctx.Log("Existing Services:")
-        runCommand(ctx, "kubectl get svc -A")
+	framework.NewTest(t).Run(func(ctx framework.TestContext) {
+		labelNodes(ctx)
+		ns := "sample-dist"
+		fqdn := "helloworld." + ns + ".svc.cluster.local"
+		run(ctx, "kubectl create namespace "+ns)
 
-        runCommand(ctx, "kubectl label node kmesh-testing-worker topology.kubernetes.io/region=region topology.kubernetes.io/zone=zone1 topology.kubernetes.io/subzone=subzone1 --overwrite")
-        runCommand(ctx, "kubectl label node kmesh-testing-control-plane topology.kubernetes.io/region=region topology.kubernetes.io/zone=zone1 topology.kubernetes.io/subzone=subzone2 --overwrite")
+		apply(ctx, ns, svcYAML(ns, "", "  trafficDistribution: PreferClose"))
+		apply(ctx, ns, deployYAML(ns, "sub1", "kmesh-testing-worker"))
+		apply(ctx, ns, deployYAML(ns, "sub2a", "kmesh-testing-control-plane"))
+		apply(ctx, ns, deployYAML(ns, "sub2b", "kmesh-testing-control-plane"))
+		apply(ctx, ns, sleepYAML(ns))
 
-        ns, svc := "sample-dist", "helloworld"
-        fqdn := svc + "." + ns + ".svc.cluster.local"
-        localVer := "sub1"
-        rem1, rem2 := "sub2-A", "sub2-B"
+		for _, d := range []string{"helloworld-sub1", "helloworld-sub2a", "helloworld-sub2b", "sleep"} {
+			waitDep(ctx, ns, d)
+		}
 
-        runCommand(ctx, "kubectl create namespace "+ns)
-        applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: v1
-kind: Service
-metadata:
-  name: %s
-  namespace: %s
-  labels: {app: helloworld}
-spec:
-  selector: {app: helloworld}
-  ports:
-    - name: http
-      port: 5000
-      targetPort: 5000
-  trafficDistribution: PreferClose
-`, svc, ns))
+		run(ctx, "kubectl delete deployment helloworld-sub1 -n "+ns)
+		ip, pod := clusterIP(ctx, ns), sleepPod(ctx, ns)
 
-        // Local Deployment
-        applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata: {name:helloworld-%s,namespace:%s,labels:{app:helloworld,version:%s}}
-spec:
-  replicas:1
-  selector:{matchLabels:{app:helloworld,version:%s}}
-  template:
-    metadata:{labels:{app:helloworld,version:%s}}
-    spec:
-      containers:[{name:helloworld,image:docker.io/istio/examples-helloworld-v1,env:[{name:SERVICE_VERSION,value:%s}],ports:[{containerPort:5000}]}]
-      nodeSelector:{kubernetes.io/hostname:kmesh-testing-worker}
-`, localVer, ns, localVer, localVer, localVer, localVer))
+		cnt := map[string]int{}
+		for i := 0; i < 30; i++ {
+			out := curl(ctx, ns, pod, fqdn, ip)
+			for _, v := range []string{"sub2a", "sub2b"} {
+				if strings.Contains(out, v) {
+					cnt[v]++
+				}
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
 
-        // Two remote pods on control-plane
-        for _, v := range []string{rem1, rem2} {
-            applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata: {name:helloworld-%s,namespace:%s,labels:{app:helloworld,version:%s}}
-spec:
-  replicas:1
-  selector:{matchLabels:{app:helloworld,version:%s}}
-  template:
-    metadata:{labels:{app:helloworld,version:%s}}
-    spec:
-      containers:[{name:helloworld,image:docker.io/istio/examples-helloworld-v1,env:[{name:SERVICE_VERSION,value:%s}],ports:[{containerPort:5000}]}]
-      nodeSelector:{kubernetes.io/hostname:kmesh-testing-control-plane}
-`, v, ns, v, v, v, v))
-        }
-
-        // Sleep client
-        applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata: {name:sleep,namespace:%s,labels:{app:sleep}}
-spec:
-  replicas:1
-  selector:{matchLabels:{app:sleep}}
-  template:
-    metadata:{labels:{app:sleep}}
-    spec:
-      containers:[{name:sleep,image:curlimages/curl,command:["/bin/sleep","infinity"]}]
-      nodeSelector:{kubernetes.io/hostname:kmesh-testing-worker}
-`, ns))
-
-        waitForDeployment(ctx, ns, "helloworld-"+localVer)
-        waitForDeployment(ctx, ns, "helloworld-"+rem1)
-        waitForDeployment(ctx, ns, "helloworld-"+rem2)
-        waitForDeployment(ctx, ns, "sleep")
-
-        runCommand(ctx, "kubectl delete deployment helloworld-"+localVer+" -n "+ns)
-        ip := getClusterIP(ctx, ns, svc)
-        pod := getSleepPod(ctx, ns)
-
-        counts := map[string]int{}
-        for i := 0; i < 20; i++ {
-            out, _ := curlHello(ctx, ns, pod, fqdn, ip)
-            for _, v := range []string{rem1, rem2} {
-                if strings.Contains(out, v) {
-                    counts[v]++
-                }
-            }
-            time.Sleep(200 * time.Millisecond)
-        }
-        ctx.Logf("Distribution: %+v", counts)
-        if counts[rem1] == 0 || counts[rem2] == 0 {
-            ctx.Fatalf("Expected both %s and %s, got %+v", rem1, rem2, counts)
-        }
-    })
+		if cnt["sub2a"] == 0 || cnt["sub2b"] == 0 {
+			ctx.Fatalf("traffic not balanced: %+v", cnt)
+		}
+	})
 }
