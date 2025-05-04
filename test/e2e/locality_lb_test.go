@@ -51,8 +51,6 @@ func getK8sClient() (*kubernetes.Clientset, error) {
 	if k8sClient != nil {
 		return k8sClient, nil
 	}
-	var config *rest.Config
-	var err error
 	// Try in-cluster config first
 	config, err := rest.InClusterConfig()
 	if err != nil {
