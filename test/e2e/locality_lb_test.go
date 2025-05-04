@@ -54,16 +54,14 @@ const (
 var clientset *kubernetes.Clientset
 
 // getK8sClient initializes a Kubernetes clientset.
-// It first tries in-cluster config; if that fails, it falls back to
-// the KUBECONFIG environment variable, or ~/.kube/config.
+// It first tries in-cluster config; if that fails, falls back to KUBECONFIG or ~/.kube/config.
 func getK8sClient() (*kubernetes.Clientset, error) {
 	if clientset != nil {
 		return clientset, nil
 	}
-	// 1) Try in-cluster
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
-		// 2) Fallback to kubeconfig
+		// Fallback to kubeconfig
 		kubeconfig := os.Getenv("KUBECONFIG")
 		if kubeconfig == "" {
 			home := os.Getenv("HOME")
@@ -88,14 +86,14 @@ func applyManifest(namespace, manifest string) error {
 	if err != nil {
 		return err
 	}
-	trimmed := strings.TrimSpace(manifest)
-	if trimmed == "" {
+	m := strings.TrimSpace(manifest)
+	if m == "" {
 		return nil
 	}
 	// Service?
-	if strings.Contains(trimmed, "kind: Service") {
+	if strings.Contains(m, "kind: Service") {
 		svc := &corev1.Service{}
-		if err := yaml.Unmarshal([]byte(trimmed), svc); err != nil {
+		if err := yaml.Unmarshal([]byte(m), svc); err != nil {
 			return err
 		}
 		svc.Namespace = namespace
@@ -106,9 +104,9 @@ func applyManifest(namespace, manifest string) error {
 		return err
 	}
 	// Deployment?
-	if strings.Contains(trimmed, "kind: Deployment") {
+	if strings.Contains(m, "kind: Deployment") {
 		dep := &appsv1.Deployment{}
-		if err := yaml.Unmarshal([]byte(trimmed), dep); err != nil {
+		if err := yaml.Unmarshal([]byte(m), dep); err != nil {
 			return err
 		}
 		dep.Namespace = namespace
@@ -118,7 +116,7 @@ func applyManifest(namespace, manifest string) error {
 		}
 		return err
 	}
-	return fmt.Errorf("unsupported manifest kind:\n%s", trimmed)
+	return fmt.Errorf("unsupported manifest kind:\n%s", m)
 }
 
 // ensureNamespace makes sure the test namespace exists.
@@ -139,7 +137,7 @@ func TestLocalityLoadBalancing_PreferClose(t *testing.T) {
 	framework.NewTest(t).Run(func(t framework.TestContext) {
 		ensureNamespace(t)
 
-		// 1) Service definition
+		// 1) Service: PreferClose
 		serviceYAML := `
 apiVersion: v1
 kind: Service
@@ -158,7 +156,8 @@ spec:
   clusterIP: None
   trafficDistribution: PreferClose
 `
-		// 2) Local deployment (on worker)
+
+		// 2) Local Deployment
 		depLocal := `
 apiVersion: apps/v1
 kind: Deployment
@@ -192,7 +191,8 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: kmesh-testing-worker
 `
-		// 3) Remote deployment (on control-plane)
+
+		// 3) Remote Deployment
 		depRemote := `
 apiVersion: apps/v1
 kind: Deployment
@@ -230,6 +230,7 @@ spec:
         operator: Exists
         effect: NoSchedule
 `
+
 		// 4) Sleep client
 		clientDep := `
 apiVersion: apps/v1
@@ -271,46 +272,45 @@ spec:
 			}
 		}
 
-		// Wait for the helloworld pods and the sleep pod to be Ready
-		waitCmd := fmt.Sprintf("kubectl wait --for=condition=ready pod -l app=helloworld -n %s --timeout=120s", ns)
-		if out, err := shell.Execute(true, waitCmd); err != nil {
+		// Wait for pods ready
+		if out, err := shell.Execute(true,
+			fmt.Sprintf("kubectl wait --for=condition=ready pod -l app=helloworld -n %s --timeout=120s", ns)); err != nil {
 			t.Fatalf("waiting for helloworld pods failed: %v\n%s", err, out)
 		}
-		waitCmd = fmt.Sprintf("kubectl wait --for=condition=ready pod -l app=sleep -n %s --timeout=120s", ns)
-		if out, err := shell.Execute(true, waitCmd); err != nil {
+		if out, err := shell.Execute(true,
+			fmt.Sprintf("kubectl wait --for=condition=ready pod -l app=sleep -n %s --timeout=120s", ns)); err != nil {
 			t.Fatalf("waiting for sleep pod failed: %v\n%s", err, out)
 		}
 
-		// Identify the sleep pod
+		// Identify sleep pod
 		cs, err := getK8sClient()
 		if err != nil {
 			t.Fatalf("getK8sClient failed: %v", err)
 		}
-		podList, err := cs.CoreV1().Pods(ns).List(context.TODO(), metav1.ListOptions{LabelSelector: "app=sleep"})
-		if err != nil || len(podList.Items) == 0 {
+		pods, err := cs.CoreV1().Pods(ns).List(context.TODO(), metav1.ListOptions{LabelSelector: "app=sleep"})
+		if err != nil || len(pods.Items) == 0 {
 			t.Fatalf("failed to list sleep pod: %v", err)
 		}
-		sleepPod := podList.Items[0].Name
+		sleepPod := pods.Items[0].Name
 
-		// 1) Verify PreferClose: traffic to local pod first
+		// 1) PreferClose: expect local first
 		t.Log("Verifying PreferClose: expecting local version")
 		start := time.Now()
 		for {
 			out, err := shell.Execute(false,
-				fmt.Sprintf("kubectl exec -n %s %s -- curl -sS http://%s.%s.svc.cluster.local:5000/hello",
+				fmt.Sprintf("kubectl exec -n %s %s -- curl -s http://%s.%s.svc.cluster.local:5000/hello",
 					ns, sleepPod, serviceName, ns))
 			t.Logf("curl output: %q, err: %v", out, err)
 			if err == nil && strings.Contains(out, localVersion) {
-				t.Logf("Got local response: %s", out)
 				break
 			}
 			if time.Since(start) > 60*time.Second {
-				t.Fatalf("PreferClose local check timed out, last: %q err: %v", out, err)
+				t.Fatalf("PreferClose local timed out, last: %q err: %v", out, err)
 			}
 			time.Sleep(2 * time.Second)
 		}
 
-		// 2) Delete local pod and verify failover to remote
+		// 2) Delete local and verify failover
 		t.Logf("Deleting local deployment %q", localDeployName)
 		if err := cs.AppsV1().Deployments(ns).Delete(context.TODO(), localDeployName, metav1.DeleteOptions{}); err != nil {
 			t.Fatalf("deleting local deployment failed: %v", err)
@@ -319,15 +319,14 @@ spec:
 		start = time.Now()
 		for {
 			out, err := shell.Execute(false,
-				fmt.Sprintf("kubectl exec -n %s %s -- curl -sS http://%s.%s.svc.cluster.local:5000/hello",
+				fmt.Sprintf("kubectl exec -n %s %s -- curl -s http://%s.%s.svc.cluster.local:5000/hello",
 					ns, sleepPod, serviceName, ns))
-			t.Logf("curl output after delete: %q, err: %v", out, err)
+			t.Logf("curl after delete: %q, err: %v", out, err)
 			if err == nil && strings.Contains(out, remoteVersion) {
-				t.Logf("Got remote response: %s", out)
 				break
 			}
 			if time.Since(start) > 60*time.Second {
-				t.Fatalf("PreferClose failover check timed out, last: %q err: %v", out, err)
+				t.Fatalf("PreferClose failover timed out, last: %q err: %v", out, err)
 			}
 			time.Sleep(2 * time.Second)
 		}
@@ -338,7 +337,7 @@ func TestLocalityLoadBalancing_Local(t *testing.T) {
 	framework.NewTest(t).Run(func(t framework.TestContext) {
 		ensureNamespace(t)
 
-		// Service in strict Local mode
+		// Service: Local (strict)
 		serviceYAML := `
 apiVersion: v1
 kind: Service
@@ -357,41 +356,151 @@ spec:
   clusterIP: None
   trafficDistribution: Local
 `
-		// Reuse the same deployments and client as above
-		depLocal := /* same as above */
-		depRemote := /* same as above */
-		clientDep := /* same as above */
+
+		// Local, Remote, and Sleep manifests are identical to the first test
+		depLocal := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ` + localDeployName + `
+  namespace: ` + ns + `
+  labels:
+    app: helloworld
+    version: ` + localVersion + `
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: helloworld
+      version: ` + localVersion + `
+  template:
+    metadata:
+      labels:
+        app: helloworld
+        version: ` + localVersion + `
+    spec:
+      containers:
+      - name: helloworld
+        image: docker.io/istio/examples-helloworld-v1
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: SERVICE_VERSION
+          value: ` + localVersion + `
+        ports:
+        - containerPort: 5000
+      nodeSelector:
+        kubernetes.io/hostname: kmesh-testing-worker
+`
+		depRemote := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ` + remoteDeployName + `
+  namespace: ` + ns + `
+  labels:
+    app: helloworld
+    version: ` + remoteVersion + `
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: helloworld
+      version: ` + remoteVersion + `
+  template:
+    metadata:
+      labels:
+        app: helloworld
+        version: ` + remoteVersion + `
+    spec:
+      containers:
+      - name: helloworld
+        image: docker.io/istio/examples-helloworld-v1
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: SERVICE_VERSION
+          value: ` + remoteVersion + `
+        ports:
+        - containerPort: 5000
+      nodeSelector:
+        kubernetes.io/hostname: kmesh-testing-control-plane
+      tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+`
+		clientDep := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ` + sleepDeployName + `
+  namespace: ` + ns + `
+  labels:
+    app: sleep
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sleep
+  template:
+    metadata:
+      labels:
+        app: sleep
+    spec:
+      containers:
+      - name: sleep
+        image: curlimages/curl
+        command: ["/bin/sleep","infinity"]
+        imagePullPolicy: IfNotPresent
+      nodeSelector:
+        kubernetes.io/hostname: kmesh-testing-worker
+`
 
 		// Apply manifests
-		for _, manifest := range []string{serviceYAML, depLocal, depRemote, clientDep} {
+		for name, manifest := range map[string]string{
+			"service": serviceYAML,
+			"local":   depLocal,
+			"remote":  depRemote,
+			"client":  clientDep,
+		} {
+			t.Logf("Applying %s manifest", name)
 			if err := applyManifest(ns, manifest); err != nil {
-				t.Fatalf("applyManifest failed: %v", err)
+				t.Fatalf("applyManifest(%s) failed: %v", name, err)
 			}
 		}
 
 		// Wait for readiness
-		shell.Execute(true, fmt.Sprintf("kubectl wait --for=condition=ready pod -l app=helloworld -n %s --timeout=120s", ns))
-		shell.Execute(true, fmt.Sprintf("kubectl wait --for=condition=ready pod -l app=sleep -n %s --timeout=120s", ns))
+		shell.Execute(true, fmt.Sprintf(
+			"kubectl wait --for=condition=ready pod -l app=helloworld -n %s --timeout=120s", ns))
+		shell.Execute(true, fmt.Sprintf(
+			"kubectl wait --for=condition=ready pod -l app=sleep -n %s --timeout=120s", ns))
 
-		// Find the sleep pod
-		cs, _ := getK8sClient()
-		pods, _ := cs.CoreV1().Pods(ns).List(context.TODO(), metav1.ListOptions{LabelSelector: "app=sleep"})
+		// Discover sleep pod
+		cs, err := getK8sClient()
+		if err != nil {
+			t.Fatalf("getK8sClient failed: %v", err)
+		}
+		pods, err := cs.CoreV1().Pods(ns).List(context.TODO(), metav1.ListOptions{LabelSelector: "app=sleep"})
+		if err != nil || len(pods.Items) == 0 {
+			t.Fatalf("failed to list sleep pod: %v", err)
+		}
 		sleepPod := pods.Items[0].Name
 
-		// 1) Initial request – must hit local
+		// 1) Initial request — must hit local
 		out, err := shell.Execute(false,
-			fmt.Sprintf("kubectl exec -n %s %s -- curl -sS http://%s.%s.svc.cluster.local:5000/hello",
+			fmt.Sprintf("kubectl exec -n %s %s -- curl -s http://%s.%s.svc.cluster.local:5000/hello",
 				ns, sleepPod, serviceName, ns))
 		if err != nil || !strings.Contains(out, localVersion) {
-			t.Fatalf("Local mode initial request failed: got %q err: %v", out, err)
+			t.Fatalf("Local mode initial failed: got %q err: %v", out, err)
 		}
 
-		// 2) Delete local – strict mode must NOT fall back
-		cs.AppsV1().Deployments(ns).Delete(context.TODO(), localDeployName, metav1.DeleteOptions{})
+		// 2) Delete local — should NOT fall back
+		if err := cs.AppsV1().Deployments(ns).Delete(context.TODO(), localDeployName, metav1.DeleteOptions{}); err != nil {
+			t.Fatalf("deleting local deployment failed: %v", err)
+		}
 		time.Sleep(5 * time.Second)
 
 		out, err = shell.Execute(false,
-			fmt.Sprintf("kubectl exec -n %s %s -- curl -m 5 -sS http://%s.%s.svc.cluster.local:5000/hello",
+			fmt.Sprintf("kubectl exec -n %s %s -- curl -m 5 -s http://%s.%s.svc.cluster.local:5000/hello",
 				ns, sleepPod, serviceName, ns))
 		if err == nil && strings.Contains(out, remoteVersion) {
 			t.Fatalf("Local mode unexpectedly fell back to remote: %q", out)
