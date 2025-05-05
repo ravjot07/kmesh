@@ -15,15 +15,6 @@ pods via nodeSelector. DNS races are avoided by fetching the
 ClusterIP and using curl --resolve (with IPv6 brackets).
 */
 
-//go:build integ
-// +build integ
-
-/*
-   Integration tests for Kmesh locality‑aware load‑balancing
-
-   ──  Copyright © 2025 Kmesh Authors  ──────────────────────────────────────
-*/
-
 package kmesh
 
 import (
