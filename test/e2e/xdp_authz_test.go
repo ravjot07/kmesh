@@ -32,22 +32,33 @@
  // Helper utilities
  ///////////////////////////////////////////////////////////////////////////////
  
- // dedent removes the smallest common indentation from all non‑blank lines.
- // It lets us embed nicely indented raw‑string YAML without breaking kubectl.
+ // dedent — removes the smallest common indentation **and** converts any
+ // leading TAB characters to two spaces so the result is always YAML‑safe.
  func dedent(in string) string {
 	 lines := strings.Split(in, "\n")
  
-	 // Find minimum indent among non‑blank lines.
+	 // 1) normalise the indentation – replace every tab at the start of a line
+	 //    with two spaces (YAML forbids tab indents)
+	 for i, l := range lines {
+		 trim := strings.TrimLeft(l, " \t")
+		 indentPart := l[:len(l)-len(trim)]
+		 indentPart = strings.ReplaceAll(indentPart, "\t", "  ")
+		 lines[i] = indentPart + trim
+	 }
+ 
+	 // 2) find smallest indent (in spaces) among non‑blank lines
 	 min := -1
 	 for _, l := range lines {
 		 if strings.TrimSpace(l) == "" {
 			 continue
 		 }
-		 indent := len(l) - len(strings.TrimLeft(l, " \t"))
-		 if min == -1 || indent < min {
-			 min = indent
+		 n := len(l) - len(strings.TrimLeft(l, " "))
+		 if min == -1 || n < min {
+			 min = n
 		 }
 	 }
+ 
+	 // 3) strip that indent
 	 if min > 0 {
 		 for i, l := range lines {
 			 if len(l) >= min {
@@ -58,7 +69,8 @@
 	 return strings.TrimSpace(strings.Join(lines, "\n"))
  }
  
- // applyYAML writes manifest to a temp file (after dedenting) and runs kubectl.
+ // applyYAML writes a manifest to a temp file (after dedenting/tabs→spaces)
+ // and runs `kubectl apply -f`.
  func applyYAML(manifest string) error {
 	 manifest = dedent(manifest)
  
@@ -89,26 +101,31 @@
  
  // deleteResource ignores errors when deleting a Kubernetes resource.
  func deleteResource(kind, name string) {
-	 fmt.Printf("DEBUG: Deleting resource %s/%s\n", kind, name)
-	 osExec.Command("kubectl", "delete", kind, name, "--ignore-not-found").Run()
+	 fmt.Printf("DEBUG: Deleting %s/%s\n", kind, name)
+	 _ = osExec.Command("kubectl", "delete", kind, name, "--ignore-not-found").Run()
  }
  
- // getPodName returns the first pod name matching a selector.
+ // getPodName returns the first pod name in a namespace, optionally filtered
+ // by a label selector. If sel=="" we don't add the -l flag.
  func getPodName(ns, sel string) (string, error) {
-	 out, err := osExec.Command("kubectl", "get", "pods", "-n", ns,
-		 "-l", sel, "-o", "jsonpath={.items[0].metadata.name}").CombinedOutput()
+	 args := []string{"get", "pods", "-n", ns}
+	 if sel != "" {
+		 args = append(args, "-l", sel)
+	 }
+	 args = append(args, "-o", "jsonpath={.items[0].metadata.name}")
+	 out, err := osExec.Command("kubectl", args...).CombinedOutput()
 	 if err != nil {
-		 return "", fmt.Errorf("get pod name: %w\n%s", err, out)
+		 return "", fmt.Errorf("kubectl get pods: %w\n%s", err, out)
 	 }
 	 return string(out), nil
  }
  
- // getPodIP returns the IP of the first pod matching a selector.
+ // getPodIP returns the IP of the first pod matching a label selector.
  func getPodIP(ns, sel string) (string, error) {
 	 out, err := osExec.Command("kubectl", "get", "pods", "-n", ns,
 		 "-l", sel, "-o", "jsonpath={.items[0].status.podIP}").CombinedOutput()
 	 if err != nil {
-		 return "", fmt.Errorf("get pod IP: %w\n%s", err, out)
+		 return "", fmt.Errorf("kubectl get pod IP: %w\n%s", err, out)
 	 }
 	 return string(out), nil
  }
@@ -121,17 +138,17 @@
 	 const ns = "default"
  
 	 //-----------------------------------------------------------------------
-	 // Enable XDP‑based authorization
+	 // Enable kernel‑space authz
 	 //-----------------------------------------------------------------------
-	 t.Log("Enabling XDP‑based authorization (kmeshctl authz enable)")
+	 t.Log("Enabling XDP authz")
 	 if out, err := osExec.Command("kmeshctl", "authz", "enable").CombinedOutput(); err != nil {
-		 t.Fatalf("kmeshctl authz enable failed: %v\n%s", err, out)
+		 t.Fatalf("kmeshctl authz enable: %v\n%s", err, out)
 	 }
  
 	 //-----------------------------------------------------------------------
-	 // Deploy Fortio server (8080) and service
+	 // Deploy Fortio server (port 8080) and service
 	 //-----------------------------------------------------------------------
-	 serverYAML := `
+	 serverManifest := `
 	 apiVersion: apps/v1
 	 kind: Deployment
 	 metadata:
@@ -164,8 +181,8 @@
 	   - port: 8080
 		 targetPort: 8080
 	 `
-	 if err := applyYAML(serverYAML); err != nil {
-		 t.Fatalf("deploy fortio-server: %v", err)
+	 if err := applyYAML(serverManifest); err != nil {
+		 t.Fatalf("deploy server: %v", err)
 	 }
 	 defer deleteResource("deployment", "fortio-server")
 	 defer deleteResource("service", "fortio-server")
@@ -173,7 +190,7 @@
 	 //-----------------------------------------------------------------------
 	 // Deploy Fortio client (sleep pod)
 	 //-----------------------------------------------------------------------
-	 clientYAML := `
+	 clientManifest := `
 	 apiVersion: apps/v1
 	 kind: Deployment
 	 metadata:
@@ -195,48 +212,48 @@
 			 image: fortio/fortio:latest
 			 command: ["sleep","3600"]
 	 `
-	 if err := applyYAML(clientYAML); err != nil {
-		 t.Fatalf("deploy fortio-client: %v", err)
+	 if err := applyYAML(clientManifest); err != nil {
+		 t.Fatalf("deploy client: %v", err)
 	 }
 	 defer deleteResource("deployment", "fortio-client")
  
 	 //-----------------------------------------------------------------------
-	 // Wait for pods to be ready (with debug on failure)
+	 // Wait for pods Ready (dump info on failure)
 	 //-----------------------------------------------------------------------
 	 waitReady := func(label string) {
 		 if err := osExec.Command("kubectl", "wait", "-n", ns,
 			 "--for=condition=Ready", "pod", "-l", "app="+label, "--timeout=120s").Run(); err != nil {
  
-			 // dump info
 			 pods, _ := osExec.Command("kubectl", "get", "pods", "-n", ns, "-o", "wide").CombinedOutput()
 			 pod, _ := getPodName(ns, "app="+label)
 			 desc, _ := osExec.Command("kubectl", "describe", "pod", pod, "-n", ns).CombinedOutput()
-			 logs, _ := osExec.Command("kubectl", "logs", pod, "-n", ns).CombinedOutput()
-			 t.Fatalf("%s not Ready: %v\n\nPods:\n%s\n\ndescribe:\n%s\n\nlogs:\n%s", label, err, pods, desc, logs)
+			 logs, _ := osExec.Command("kubectl", "logs", pod, "-n", ns, "--tail=100").CombinedOutput()
+			 t.Fatalf("%s not ready: %v\nPods:\n%s\nDescribe:\n%s\nLogs:\n%s",
+				 label, err, pods, desc, logs)
 		 }
 	 }
 	 waitReady("fortio-server")
 	 waitReady("fortio-client")
  
 	 //-----------------------------------------------------------------------
-	 // Runtime info
+	 // Cluster info
 	 //-----------------------------------------------------------------------
-	 clientPod, _ := getPodName(ns, "app=fortio-client")
 	 serverIP, _ := getPodIP(ns, "app=fortio-server")
 	 clientIP, _ := getPodIP(ns, "app=fortio-client")
+	 clientPod, _ := getPodName(ns, "app=fortio-client")
  
 	 //-----------------------------------------------------------------------
-	 // Scenarios
+	 // Scenarios table
 	 //-----------------------------------------------------------------------
 	 scenarios := []struct {
-		 name        string
-		 policyName  string
-		 manifest    string
-		 target      string
-		 logMarkers  []string
+		 name       string
+		 policyName string
+		 manifest   string
+		 targetURL  string
+		 logNeedle  []string
 	 }{
 		 {
-			 name:       "DenyByDstPort",
+			 name:       "deny-by-dstport",
 			 policyName: "deny-by-dstport",
 			 manifest: `
 			 apiVersion: security.istio.io/v1beta1
@@ -253,11 +270,11 @@
 				 - operation:
 					 ports: ["8080"]
 			 `,
-			 target:     fmt.Sprintf("%s:8080", serverIP),
-			 logMarkers: []string{"port 8080", "action: DENY"},
+			 targetURL: fmt.Sprintf("%s:8080", serverIP),
+			 logNeedle: []string{"port 8080", "action: DENY"},
 		 },
 		 {
-			 name:       "DenyBySrcIP",
+			 name:       "deny-by-srcip",
 			 policyName: "deny-by-srcip",
 			 manifest: fmt.Sprintf(`
 			 apiVersion: security.istio.io/v1beta1
@@ -274,11 +291,11 @@
 				 - source:
 					 ipBlocks: ["%s"]
 			 `, clientIP),
-			 target:     fmt.Sprintf("%s:8080", serverIP),
-			 logMarkers: []string{"srcip", "action: DENY"},
+			 targetURL: fmt.Sprintf("%s:8080", serverIP),
+			 logNeedle: []string{"srcip", "action: DENY"},
 		 },
 		 {
-			 name:       "DenyByDstIP",
+			 name:       "deny-by-dstip",
 			 policyName: "deny-by-dstip",
 			 manifest: fmt.Sprintf(`
 			 apiVersion: security.istio.io/v1beta1
@@ -295,38 +312,38 @@
 				 - key: destination.ip
 				   values: ["%s"]
 			 `, serverIP),
-			 target:     fmt.Sprintf("%s:8080", serverIP),
-			 logMarkers: []string{"dstip", "action: DENY"},
+			 targetURL: fmt.Sprintf("%s:8080", serverIP),
+			 logNeedle: []string{"dstip", "action: DENY"},
 		 },
 	 }
  
 	 //-----------------------------------------------------------------------
-	 // Execute each scenario
+	 // Execute scenarios
 	 //-----------------------------------------------------------------------
 	 for _, sc := range scenarios {
-		 sc := sc // capture
+		 sc := sc
 		 t.Run(sc.name, func(t *testing.T) {
-			 // Apply policy
+			 // Create policy
 			 if err := applyYAML(sc.manifest); err != nil {
 				 t.Fatalf("apply %s: %v", sc.policyName, err)
 			 }
 			 defer deleteResource("authorizationpolicy", sc.policyName)
  
-			 time.Sleep(3 * time.Second) // propagation
+			 time.Sleep(3 * time.Second) // let policy propagate
  
-			 // Run Fortio (expect Code -1)
+			 // Call server via Fortio – expect Code ‑1 (connection denied)
 			 out, _ := osExec.Command("kubectl", "exec", "-n", ns, clientPod, "--",
-				 "fortio", "load", "-c", "1", "-n", "1", "-qps", "0", sc.target).CombinedOutput()
+				 "fortio", "load", "-c", "1", "-n", "1", "-qps", "0", sc.targetURL).CombinedOutput()
 			 if !strings.Contains(string(out), "Code -1") {
-				 t.Fatalf("traffic not denied, fortio output:\n%s", out)
+				 t.Fatalf("request not denied – fortio output:\n%s", out)
 			 }
  
-			 // Check KMesh logs
+			 // Check KMesh daemon logs for rule match
 			 kmeshPod, _ := getPodName("kmesh-system", "")
-			 logs, _ := osExec.Command("kubectl", "logs", "-n", "kmesh-system", kmeshPod).CombinedOutput()
-			 for _, m := range sc.logMarkers {
-				 if !strings.Contains(string(logs), m) {
-					 t.Fatalf("log marker %q not found in KMesh logs", m)
+			 logs, _ := osExec.Command("kubectl", "logs", "-n", "kmesh-system", kmeshPod, "--tail=500").CombinedOutput()
+			 for _, needle := range sc.logNeedle {
+				 if !strings.Contains(string(logs), needle) {
+					 t.Fatalf("log needle %q not found in KMesh logs", needle)
 				 }
 			 }
 		 })
