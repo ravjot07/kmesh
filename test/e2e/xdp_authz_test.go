@@ -10,6 +10,7 @@
  import (
 	 "bytes"
 	 "fmt"
+	 "os"
 	 osExec "os/exec"
 	 "strings"
 	 "testing"
@@ -20,10 +21,12 @@
  // renderTemplate runs text/template on tmpl with params,
  // then:
  //  1) trims a leading newline
- //   2) replaces any leading TABs with two spaces
+ //  2) replaces any leading TABs with two spaces
  //  3) finds the minimum indent (in spaces) across all non-blank lines
  //  4) removes exactly that indent from every line
+ // This preserves nested structure while stripping uniform margin.
  func renderTemplate(tmpl string, params any) (string, error) {
+	 // 1) Template execution
 	 tpl := template.New("manifest").Option("missingkey=error")
 	 tpl, err := tpl.Parse(tmpl)
 	 if err != nil {
@@ -33,28 +36,39 @@
 	 if err := tpl.Execute(&buf, params); err != nil {
 		 return "", err
 	 }
-	 out := strings.TrimPrefix(buf.String(), "\n")
+	 out := buf.String()
  
+	 // 2) Trim leading newline
+	 out = strings.TrimPrefix(out, "\n")
+ 
+	 // 3) Split into lines and normalize leading tabs→spaces
 	 lines := strings.Split(out, "\n")
 	 for i, l := range lines {
+		 // extract leading whitespace (spaces or tabs)
 		 j := 0
 		 for j < len(l) && (l[j] == ' ' || l[j] == '\t') {
 			 j++
 		 }
-		 prefix := strings.ReplaceAll(l[:j], "\t", "  ")
+		 prefix := l[:j]
+		 // replace each tab in that prefix with two spaces
+		 prefix = strings.ReplaceAll(prefix, "\t", "  ")
 		 lines[i] = prefix + l[j:]
 	 }
  
+	 // 4) Compute minimum indent across non-blank lines
 	 minIndent := -1
 	 for _, l := range lines {
 		 if strings.TrimSpace(l) == "" {
 			 continue
 		 }
+		 // count leading spaces
 		 indent := len(l) - len(strings.TrimLeft(l, " "))
 		 if minIndent < 0 || indent < minIndent {
 			 minIndent = indent
 		 }
 	 }
+ 
+	 // 5) Strip that indent
 	 if minIndent > 0 {
 		 for i, l := range lines {
 			 if len(l) >= minIndent {
@@ -66,8 +80,8 @@
 	 return strings.Join(lines, "\n"), nil
  }
  
- // applyDocs splits multi-doc YAML on "\n---\n" and applies each document via kubectl,
- // with debug logs.
+ // applyDocs splits a multi-doc YAML on "\n---\n" and streams each to kubectl.
+ // It prints DEBUG logs for both the document and the kubectl output.
  func applyDocs(yaml string) error {
 	 docs := strings.Split(yaml, "\n---\n")
 	 for idx, doc := range docs {
@@ -165,6 +179,7 @@
 		   - port: 8080
 			 targetPort: 8080
 	 `
+	 // Render & debug
 	 rendered, err := renderTemplate(serverTmpl, nil)
 	 if err != nil {
 		 t.Fatalf("render server manifest: %v", err)
@@ -176,7 +191,7 @@
 	 defer deleteRes("deployment", "fortio-server", ns)
 	 defer deleteRes("service", "fortio-server", ns)
  
-	 // 2) Fortio client (run fortio server so the pod stays Ready)
+	 // 2) Fortio client
 	 clientTmpl := `
 		 apiVersion: apps/v1
 		 kind: Deployment
@@ -228,18 +243,18 @@
 		 {
 			 name:    "deny-by-dstport",
 			 tmpl: `apiVersion: security.istio.io/v1beta1
-	 kind: AuthorizationPolicy
-	 metadata:
-	   name: deny-by-dstport
-	 spec:
-	   selector:
-		 matchLabels:
-		   app: fortio-server
-	   action: DENY
-	   rules:
-	   - to:
-		 - operation:
-			 ports: ["8080"]`,
+ kind: AuthorizationPolicy
+ metadata:
+   name: deny-by-dstport
+ spec:
+   selector:
+	 matchLabels:
+	   app: fortio-server
+   action: DENY
+   rules:
+   - to:
+	 - operation:
+		 ports: ["8080"]`,
 			 params:  nil,
 			 target:  fmt.Sprintf("%s:8080", serverIP),
 			 logKeys: []string{"port 8080", "action: DENY"},
@@ -247,18 +262,18 @@
 		 {
 			 name:    "deny-by-srcip",
 			 tmpl: `apiVersion: security.istio.io/v1beta1
-	 kind: AuthorizationPolicy
-	 metadata:
-	   name: deny-by-srcip
-	 spec:
-	   selector:
-		 matchLabels:
-		   app: fortio-server
-	   action: DENY
-	   rules:
-	   - from:
-		 - source:
-			 ipBlocks: ["{{.ClientIP}}"]`,
+ kind: AuthorizationPolicy
+ metadata:
+   name: deny-by-srcip
+ spec:
+   selector:
+	 matchLabels:
+	   app: fortio-server
+   action: DENY
+   rules:
+   - from:
+	 - source:
+		 ipBlocks: ["{{.ClientIP}}"]`,
 			 params:  map[string]string{"ClientIP": clientIP},
 			 target:  fmt.Sprintf("%s:8080", serverIP),
 			 logKeys: []string{"srcip", "action: DENY"},
@@ -266,18 +281,18 @@
 		 {
 			 name:    "deny-by-dstip",
 			 tmpl: `apiVersion: security.istio.io/v1beta1
-	 kind: AuthorizationPolicy
-	 metadata:
-	   name: deny-by-dstip
-	 spec:
-	   selector:
-		 matchLabels:
-		   app: fortio-server
-	   action: DENY
-	   rules:
-	   - when:
-		 - key: destination.ip
-		   values: ["{{.ServerIP}}"]`,
+ kind: AuthorizationPolicy
+ metadata:
+   name: deny-by-dstip
+ spec:
+   selector:
+	 matchLabels:
+	   app: fortio-server
+   action: DENY
+   rules:
+   - when:
+	 - key: destination.ip
+	   values: ["{{.ServerIP}}"]`,
 			 params:  map[string]string{"ServerIP": serverIP},
 			 target:  fmt.Sprintf("%s:8080", serverIP),
 			 logKeys: []string{"dstip", "action: DENY"},
