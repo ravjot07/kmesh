@@ -11,7 +11,6 @@
  import (
 	 "bytes"
 	 "fmt"
-	 "os"
 	 osExec "os/exec"
 	 "strings"
 	 "testing"
