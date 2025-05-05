@@ -2,8 +2,8 @@
 // +build integ
 
 /*
- * XDP-based L4 Authorization E2E test
- * Follows Istio’s Eval→Split→Apply pattern for YAML manifests.
+ * XDP-based L4 Authorization E2E test with debug logging
+ * Follows Eval → Split → Apply pattern for YAML manifests.
  */
 
  package kmesh
@@ -18,34 +18,28 @@
 	 "time"
  )
  
- // renderTemplate runs Go text/template on `tmpl`, using `params`,
- // then trims the leading newline and any common left margin.
+ // renderTemplate runs text/template on tmpl with params,
+ // trims the leading newline, and removes any common left margin.
  func renderTemplate(tmpl string, params any) (string, error) {
-	 // 1) Execute the template
-	 t := template.New("manifest").Option("missingkey=error")
-	 t, err := t.Parse(tmpl)
+	 tpl := template.New("manifest").Option("missingkey=error")
+	 tpl, err := tpl.Parse(tmpl)
 	 if err != nil {
 		 return "", err
 	 }
 	 var buf bytes.Buffer
-	 if err := t.Execute(&buf, params); err != nil {
+	 if err := tpl.Execute(&buf, params); err != nil {
 		 return "", err
 	 }
 	 out := buf.String()
- 
-	 // 2) Trim the first newline
 	 out = strings.TrimPrefix(out, "\n")
  
-	 // 3) Remove the common left margin
 	 lines := strings.Split(out, "\n")
-	 // find indent of first non-blank line
 	 margin := -1
 	 for _, l := range lines {
 		 if strings.TrimSpace(l) == "" {
 			 continue
 		 }
-		 indent := len(l) - len(strings.TrimLeft(l, " "))
-		 margin = indent
+		 margin = len(l) - len(strings.TrimLeft(l, " "))
 		 break
 	 }
 	 if margin > 0 {
@@ -58,61 +52,68 @@
 	 return strings.Join(lines, "\n"), nil
  }
  
- // applyDocs splits a multi-doc YAML (---) into individual docs and
- // streams each one to `kubectl apply -f -`.
+ // applyDocs splits multi-doc YAML on "\n---\n" and applies each via kubectl,
+ // printing debug output for each document and the kubectl command.
  func applyDocs(yaml string) error {
 	 docs := strings.Split(yaml, "\n---\n")
-	 for _, d := range docs {
+	 for i, d := range docs {
 		 d = strings.TrimSpace(d)
 		 if d == "" {
 			 continue
 		 }
+		 fmt.Printf("DEBUG: Applying document %d:\n%s\n---\n", i+1, d)
 		 cmd := osExec.Command("kubectl", "apply", "-f", "-")
 		 cmd.Stdin = strings.NewReader(d)
-		 if out, err := cmd.CombinedOutput(); err != nil {
-			 return fmt.Errorf("kubectl apply: %v\n%s", err, out)
+		 out, err := cmd.CombinedOutput()
+		 fmt.Printf("DEBUG: kubectl apply output:\n%s\n", out)
+		 if err != nil {
+			 return fmt.Errorf("kubectl apply failed on doc %d: %v", i+1, err)
 		 }
 	 }
 	 return nil
  }
  
  func deleteRes(kind, name, ns string) {
+	 fmt.Printf("DEBUG: Deleting %s/%s in namespace %s\n", kind, name, ns)
 	 _ = osExec.Command("kubectl", "delete", kind, name, "-n", ns, "--ignore-not-found").Run()
  }
  
  func podName(ns, sel string) string {
 	 out, _ := osExec.Command("kubectl", "get", "pods", "-n", ns,
-		 "-l", sel,
-		 "-o", "jsonpath={.items[0].metadata.name}").CombinedOutput()
+		 "-l", sel, "-o", "jsonpath={.items[0].metadata.name}").CombinedOutput()
 	 return string(out)
  }
  
  func podIP(ns, sel string) string {
 	 out, _ := osExec.Command("kubectl", "get", "pods", "-n", ns,
-		 "-l", sel,
-		 "-o", "jsonpath={.items[0].status.podIP}").CombinedOutput()
+		 "-l", sel, "-o", "jsonpath={.items[0].status.podIP}").CombinedOutput()
 	 return string(out)
  }
  
  func waitReady(ns, label string, t *testing.T) {
-	 if out, err := osExec.Command("kubectl", "wait", "-n", ns,
+	 fmt.Printf("DEBUG: Waiting for pod app=%s in ns=%s to be Ready\n", label, ns)
+	 out, err := osExec.Command("kubectl", "wait", "-n", ns,
 		 "--for=condition=Ready", "pod", "-l", "app="+label,
-		 "--timeout=120s").CombinedOutput(); err != nil {
-		 t.Fatalf("pod %s not Ready: %v\n%s", label, err, out)
+		 "--timeout=120s").CombinedOutput()
+	 fmt.Printf("DEBUG: kubectl wait output:\n%s\n", out)
+	 if err != nil {
+		 t.Fatalf("pod %s not ready: %v", label, err)
 	 }
  }
  
  func TestXDPAuthorization(t *testing.T) {
 	 const ns = "default"
  
-	 // Enable kernel-space authz
+	 // Enable kernel-space XDP authorization
+	 fmt.Println("DEBUG: Enabling XDP authz")
 	 if out, err := osExec.Command("kmeshctl", "authz", "enable").CombinedOutput(); err != nil {
-		 t.Fatalf("kmeshctl authz enable: %v\n%s", err, out)
+		 t.Fatalf("kmeshctl authz enable failed: %v\n%s", err, out)
+	 } else {
+		 fmt.Printf("DEBUG: kmeshctl authz enable output:\n%s\n", out)
 	 }
  
-	 // 1) Fortio server + Service
-	 serverTmpl := `
- apiVersion: apps/v1
+	 // 1) Deploy Fortio server + Service
+	 serverTmpl := `apiVersion: apps/v1
  kind: Deployment
  metadata:
    name: fortio-server
@@ -148,15 +149,15 @@
 	 if err != nil {
 		 t.Fatalf("render server manifest: %v", err)
 	 }
+	 fmt.Printf("DEBUG: Rendered server manifest:\n%s\n", rendered)
 	 if err := applyDocs(rendered); err != nil {
 		 t.Fatalf("apply server manifest: %v", err)
 	 }
 	 defer deleteRes("deployment", "fortio-server", ns)
 	 defer deleteRes("service", "fortio-server", ns)
  
-	 // 2) Fortio client
-	 clientTmpl := `
- apiVersion: apps/v1
+	 // 2) Deploy Fortio client (sleep pod)
+	 clientTmpl := `apiVersion: apps/v1
  kind: Deployment
  metadata:
    name: fortio-client
@@ -181,6 +182,7 @@
 	 if err != nil {
 		 t.Fatalf("render client manifest: %v", err)
 	 }
+	 fmt.Printf("DEBUG: Rendered client manifest:\n%s\n", rendered)
 	 if err := applyDocs(rendered); err != nil {
 		 t.Fatalf("apply client manifest: %v", err)
 	 }
@@ -204,8 +206,7 @@
 	 scenarios := []scenario{
 		 {
 			 name: "deny-by-dstport",
-			 tmpl: `
- apiVersion: security.istio.io/v1beta1
+			 tmpl: `apiVersion: security.istio.io/v1beta1
  kind: AuthorizationPolicy
  metadata:
    name: deny-by-dstport
@@ -224,8 +225,7 @@
 		 },
 		 {
 			 name: "deny-by-srcip",
-			 tmpl: `
- apiVersion: security.istio.io/v1beta1
+			 tmpl: `apiVersion: security.istio.io/v1beta1
  kind: AuthorizationPolicy
  metadata:
    name: deny-by-srcip
@@ -244,8 +244,7 @@
 		 },
 		 {
 			 name: "deny-by-dstip",
-			 tmpl: `
- apiVersion: security.istio.io/v1beta1
+			 tmpl: `apiVersion: security.istio.io/v1beta1
  kind: AuthorizationPolicy
  metadata:
    name: deny-by-dstip
@@ -269,29 +268,30 @@
 		 t.Run(sc.name, func(t *testing.T) {
 			 rendered, err := renderTemplate(sc.tmpl, sc.params)
 			 if err != nil {
-				 t.Fatalf("render %s: %v", sc.name, err)
+				 t.Fatalf("render %s policy: %v", sc.name, err)
 			 }
+			 fmt.Printf("DEBUG: Rendered %s policy:\n%s\n", sc.name, rendered)
 			 if err := applyDocs(rendered); err != nil {
-				 t.Fatalf("apply %s: %v", sc.name, err)
+				 t.Fatalf("apply %s policy: %v", sc.name, err)
 			 }
 			 defer deleteRes("authorizationpolicy", sc.name, ns)
  
-			 time.Sleep(3 * time.Second) // propagation
+			 time.Sleep(3 * time.Second)
  
-			 // Fortio load → expect Code -1 (denied)
 			 out, _ := osExec.Command("kubectl", "exec", "-n", ns, clientPod, "--",
 				 "fortio", "load", "-c", "1", "-n", "1", "-qps", "0", sc.target).
 				 CombinedOutput()
+			 fmt.Printf("DEBUG: Fortio output for %s:\n%s\n", sc.name, out)
 			 if !strings.Contains(string(out), "Code -1") {
-				 t.Fatalf("expected Code -1, got:\n%s", out)
+				 t.Fatalf("expected Code -1 for %s, got:\n%s", sc.name, out)
 			 }
  
-			 // Check XDP logs
 			 kmeshPod := podName("kmesh-system", "")
 			 logs, _ := osExec.Command("kubectl", "logs", "-n", "kmesh-system", kmeshPod).CombinedOutput()
+			 fmt.Printf("DEBUG: KMesh logs for %s:\n%s\n", sc.name, logs)
 			 for _, key := range sc.logKeys {
 				 if !strings.Contains(string(logs), key) {
-					 t.Fatalf("logs missing %q", key)
+					 t.Fatalf("missing log key %q for %s", key, sc.name)
 				 }
 			 }
 		 })
