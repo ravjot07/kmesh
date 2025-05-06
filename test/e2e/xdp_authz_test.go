@@ -210,8 +210,8 @@
 			 spec:
 			   containers:
 			   - name: fortio-client
-				 image: fortio/fortio:latest
-				 args: ["server"]
+				 image: fortio/fortio:1.15.0
+        		 command: ["sleep","3600"]
 	 `
 	 rendered, err = renderTemplate(clientTmpl, nil)
 	 if err != nil {
