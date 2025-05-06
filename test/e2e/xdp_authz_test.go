@@ -8,327 +8,243 @@
 package kmesh
 
 import (
-	"bytes"
 	"fmt"
-	osExec "os/exec"
+	"os/exec"
 	"strings"
 	"testing"
-	"text/template"
 	"time"
 )
 
-// renderTemplate runs text/template on tmpl with params,
-// then:
-//  1) trims a leading newline
-//  2) replaces any leading TABs with two spaces
-//  3) finds the minimum indent (in spaces) across all non-blank lines
-//  4) removes exactly that indent from every line
-// This preserves nested structure while stripping uniform margin.
-func renderTemplate(tmpl string, params any) (string, error) {
-	// 1) Template execution
-	tpl := template.New("manifest").Option("missingkey=error")
-	tpl, err := tpl.Parse(tmpl)
+// Helper to apply a Kubernetes manifest via kubectl
+func kubectlApply(t *testing.T, manifest string) {
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", err
+		t.Fatalf("Failed to apply manifest: %v\nOutput: %s", err, string(out))
 	}
-	var buf bytes.Buffer
-	if err := tpl.Execute(&buf, params); err != nil {
-		return "", err
-	}
-	out := buf.String()
-
-	// 2) Trim leading newline
-	out = strings.TrimPrefix(out, "\n")
-
-	// 3) Split into lines and normalize leading tabs→spaces
-	lines := strings.Split(out, "\n")
-	for i, l := range lines {
-		// extract leading whitespace (spaces or tabs)
-		j := 0
-		for j < len(l) && (l[j] == ' ' || l[j] == '\t') {
-			j++
-		}
-		prefix := l[:j]
-		// replace each tab in that prefix with two spaces
-		prefix = strings.ReplaceAll(prefix, "\t", "  ")
-		lines[i] = prefix + l[j:]
-	}
-
-	// 4) Compute minimum indent across non-blank lines
-	minIndent := -1
-	for _, l := range lines {
-		if strings.TrimSpace(l) == "" {
-			continue
-		}
-		// count leading spaces
-		indent := len(l) - len(strings.TrimLeft(l, " "))
-		if minIndent < 0 || indent < minIndent {
-			minIndent = indent
-		}
-	}
-
-	// 5) Strip that indent
-	if minIndent > 0 {
-		for i, l := range lines {
-			if len(l) >= minIndent {
-				lines[i] = l[minIndent:]
-			}
-		}
-	}
-
-	return strings.Join(lines, "\n"), nil
 }
 
-// applyDocs splits a multi-doc YAML on "\n---\n" and streams each to kubectl.
-// It prints DEBUG logs for both the document and the kubectl output.
-func applyDocs(yaml string) error {
-	docs := strings.Split(yaml, "\n---\n")
-	for idx, doc := range docs {
-		doc = strings.TrimSpace(doc)
-		if doc == "" {
-			continue
-		}
-		fmt.Printf("DEBUG: Applying document %d:\n%s\n---\n", idx+1, doc)
-		cmd := osExec.Command("kubectl", "apply", "-f", "-")
-		cmd.Stdin = strings.NewReader(doc)
-		out, err := cmd.CombinedOutput()
-		fmt.Printf("DEBUG: kubectl apply output:\n%s\n", out)
+// Helper to delete resources defined in a manifest via kubectl
+func kubectlDelete(t *testing.T, manifest string) {
+	cmd := exec.Command("kubectl", "delete", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	_ = cmd.Run() // no need to fail test if cleanup fails
+}
+
+// Helper to wait for a deployment to be ready
+func waitDeploymentReady(t *testing.T, name string) {
+	cmd := exec.Command("kubectl", "rollout", "status", "deployment/"+name, "--timeout=60s")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Deployment %s not ready in time: %v\nOutput: %s", name, err, string(out))
+	}
+}
+
+func TestTCPAuthorizationXDP(t *testing.T) {
+	// Define YAML manifests for Fortio server deployment, service, and client deployment
+	serverDeploymentYAML := `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fortio-server
+  labels:
+    app: fortio-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fortio-server
+  template:
+    metadata:
+      labels:
+        app: fortio-server
+    spec:
+      containers:
+      - name: fortio-server
+        image: fortio/fortio:latest
+        args: ["server", "-grpc-port", "0", "-udp-port", "0", "-http-port", "8078"]
+        ports:
+        - containerPort: 8078
+          protocol: TCP
+`
+	serviceYAML := `apiVersion: v1
+kind: Service
+metadata:
+  name: fortio-server
+spec:
+  selector:
+    app: fortio-server
+  ports:
+  - name: http
+    protocol: TCP
+    port: 8078
+    targetPort: 8078
+`
+	clientDeploymentYAML := `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fortio-client
+  labels:
+    app: fortio-client
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fortio-client
+  template:
+    metadata:
+      labels:
+        app: fortio-client
+    spec:
+      containers:
+      - name: fortio-client
+        image: fortio/fortio:latest
+        command: ["/bin/bash", "-c", "sleep 3600"]
+`
+
+	// Apply Fortio server deployment and service, and Fortio client deployment
+	t.Log("Deploying Fortio server and client workloads...")
+	kubectlApply(t, serverDeploymentYAML)
+	kubectlApply(t, serviceYAML)
+	kubectlApply(t, clientDeploymentYAML)
+	// Ensure cleanup at the end
+	defer kubectlDelete(t, clientDeploymentYAML)
+	defer kubectlDelete(t, serviceYAML)
+	defer kubectlDelete(t, serverDeploymentYAML)
+
+	// Wait for fortio-server and fortio-client pods to be ready
+	waitDeploymentReady(t, "fortio-server")
+	waitDeploymentReady(t, "fortio-client")
+
+	// Retrieve the Fortio client and server Pod IP addresses for policy rules
+	clientIPBytes, err := exec.Command("kubectl", "get", "pod", "-l", "app=fortio-client", "-o", "jsonpath={.items[0].status.podIP}").Output()
+	if err != nil {
+		t.Fatalf("Failed to get fortio-client Pod IP: %v", err)
+	}
+	serverIPBytes, err := exec.Command("kubectl", "get", "pod", "-l", "app=fortio-server", "-o", "jsonpath={.items[0].status.podIP}").Output()
+	if err != nil {
+		t.Fatalf("Failed to get fortio-server Pod IP: %v", err)
+	}
+	clientIP := strings.TrimSpace(string(clientIPBytes))
+	serverIP := strings.TrimSpace(string(serverIPBytes))
+	t.Logf("Fortio client Pod IP: %s, server Pod IP: %s", clientIP, serverIP)
+
+	// Define AuthorizationPolicy YAMLs for each scenario, inserting the retrieved IPs
+	policyByDstPort := `apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-by-dstport
+  namespace: default
+spec:
+  action: DENY
+  rules:
+  - to:
+    - operation:
+        ports: ["8078"]
+`
+	policyBySrcIP := fmt.Sprintf(`apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-by-srcip
+  namespace: default
+spec:
+  action: DENY
+  rules:
+  - from:
+    - source:
+        ipBlocks: ["%s/32"]
+`, clientIP)
+	policyByDstIP := fmt.Sprintf(`apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-by-dstip
+  namespace: default
+spec:
+  action: DENY
+  rules:
+  - to:
+    - destination:
+        ipBlocks: ["%s/32"]
+`, serverIP)
+
+	// Helper function to run a Fortio request from the client pod and return output and error
+	runFortioFromClient := func(target string) (string, error) {
+		// Get the client pod name
+		podNameBytes, err := exec.Command("kubectl", "get", "pods", "-l", "app=fortio-client", "-o", "jsonpath={.items[0].metadata.name}").Output()
 		if err != nil {
-			return fmt.Errorf("kubectl apply failed on doc %d: %v", idx+1, err)
+			return "", fmt.Errorf("failed to get fortio-client pod name: %v", err)
 		}
-	}
-	return nil
-}
-
-func deleteRes(kind, name, ns string) {
-	fmt.Printf("DEBUG: Deleting %s/%s in ns=%s\n", kind, name, ns)
-	_ = osExec.Command("kubectl", "delete", kind, name, "-n", ns, "--ignore-not-found").Run()
-}
-
-func podName(ns, sel string) string {
-	out, _ := osExec.Command("kubectl", "get", "pods", "-n", ns,
-		"-l", sel,
-		"-o", "jsonpath={.items[0].metadata.name}").
-		CombinedOutput()
-	return string(out)
-}
-
-func podIP(ns, sel string) string {
-	out, _ := osExec.Command("kubectl", "get", "pods", "-n", ns,
-		"-l", sel,
-		"-o", "jsonpath={.items[0].status.podIP}").
-		CombinedOutput()
-	return string(out)
-}
-
-func waitReady(ns, label string, t *testing.T) {
-	fmt.Printf("DEBUG: Waiting for pod app=%s in ns=%s to be Ready\n", label, ns)
-	out, err := osExec.Command("kubectl", "wait", "-n", ns,
-		"--for=condition=Ready", "pod", "-l", "app="+label,
-		"--timeout=120s").
-		CombinedOutput()
-	fmt.Printf("DEBUG: kubectl wait output:\n%s\n", out)
-	if err != nil {
-		t.Fatalf("pod %s not ready: %v", label, err)
-	}
-}
-
-func TestXDPAuthorization(t *testing.T) {
-	const ns = "default"
-
-	// Enable XDP authz
-	fmt.Println("DEBUG: Enabling XDP authz")
-	if out, err := osExec.Command("kmeshctl", "authz", "enable").CombinedOutput(); err != nil {
-		t.Fatalf("kmeshctl authz enable failed: %v\n%s", err, out)
-	} else {
-		fmt.Printf("DEBUG: kmeshctl authz enable output:\n%s\n", out)
+		podName := strings.TrimSpace(string(podNameBytes))
+		// Execute a single Fortio request to the target from the client pod
+		cmd := exec.Command("kubectl", "exec", podName, "--", "fortio", "load", "-qps", "0", "-n", "1", "-timeout", "5s", target)
+		output, err := cmd.CombinedOutput()
+		return string(output), err
 	}
 
-	// 1) Fortio server + Service
-	serverTmpl := `
-		 apiVersion: apps/v1
-		 kind: Deployment
-		 metadata:
-		   name: fortio-server
-		   labels:
-			 app: fortio-server
-		 spec:
-		   replicas: 1
-		   selector:
-			 matchLabels:
-			   app: fortio-server
-		   template:
-			 metadata:
-			   labels:
-				 app: fortio-server
-			 spec:
-			   containers:
-			   - name: fortio-server
-				 image: fortio/fortio:latest
-				 args: ["server","-port","8080"]
-		 ---
-		 apiVersion: v1
-		 kind: Service
-		 metadata:
-		   name: fortio-server
-		 spec:
-		   selector:
-			 app: fortio-server
-		   ports:
-		   - port: 8080
-			 targetPort: 8080
-	 `
-	// Render & debug
-	rendered, err := renderTemplate(serverTmpl, nil)
-	if err != nil {
-		t.Fatalf("render server manifest: %v", err)
-	}
-	fmt.Printf("DEBUG: Rendered server manifest:\n%s\n", rendered)
-	if err := applyDocs(rendered); err != nil {
-		t.Fatalf("apply server manifest: %v", err)
-	}
-	defer deleteRes("deployment", "fortio-server", ns)
-	defer deleteRes("service", "fortio-server", ns)
+	// Scenario 1: Deny by destination port
+	t.Run("deny-by-dstport", func(t *testing.T) {
+		t.Log("Applying deny-by-dstport policy (deny traffic to port 8078)...")
+		kubectlApply(t, policyByDstPort)
+		defer kubectlDelete(t, policyByDstPort)
+		// Give a moment for policy to propagate
+		time.Sleep(2 * time.Second)
 
-	// 2) Fortio client
-	clientTmpl := `
-		 apiVersion: apps/v1
-		 kind: Deployment
-		 metadata:
-		   name: fortio-client
-		   labels:
-			 app: fortio-client
-		 spec:
-		   replicas: 1
-		   selector:
-			 matchLabels:
-			   app: fortio-client
-		   template:
-			 metadata:
-			   labels:
-				 app: fortio-client
-			 spec:
-			   containers:
-			   - name: fortio-client
-				 image: fortio/fortio:latest
-				 command: ["sleep","3600"]
-	 `
-	rendered, err = renderTemplate(clientTmpl, nil)
-	if err != nil {
-		t.Fatalf("render client manifest: %v", err)
-	}
-	fmt.Printf("DEBUG: Rendered client manifest:\n%s\n", rendered)
-	if err := applyDocs(rendered); err != nil {
-		t.Fatalf("apply client manifest: %v", err)
-	}
-	defer deleteRes("deployment", "fortio-client", ns)
+		// Attempt to connect from fortio-client to fortio-server service (port 8078 should be denied)
+		targetURL := fmt.Sprintf("http://fortio-server.default:8078")
+		output, err := runFortioFromClient(targetURL)
+		t.Logf("Fortio output:\n%s", output)
+		if err == nil {
+			t.Errorf("Fortio client request unexpectedly succeeded (expected denial)")
+		}
 
-	waitReady(ns, "fortio-server", t)
-	waitReady(ns, "fortio-client", t)
+		// Check Kmesh logs for evidence of denial by this policy
+		logs, _ := exec.Command("kubectl", "logs", "-n", "kmesh-system", "-l", "app=kmesh", "--tail=100").CombinedOutput()
+		if !strings.Contains(string(logs), "deny-by-dstport") {
+			t.Errorf("Kmesh logs do not contain expected deny-by-dstport entry")
+		}
+	})
 
-	clientPod := podName(ns, "app=fortio-client")
-	serverIP := podIP(ns, "app=fortio-server")
-	clientIP := podIP(ns, "app=fortio-client")
+	// Scenario 2: Deny by source IP
+	t.Run("deny-by-srcip", func(t *testing.T) {
+		t.Logf("Applying deny-by-srcip policy (deny traffic from source IP %s)...", clientIP)
+		kubectlApply(t, policyBySrcIP)
+		defer kubectlDelete(t, policyBySrcIP)
+		time.Sleep(2 * time.Second)
 
-	// 3) AuthorizationPolicy scenarios
-	type scenario struct {
-		name    string
-		tmpl    string
-		params  any
-		target  string
-		logKeys []string
-	}
-	scenarios := []scenario{
-		{
-			name: "deny-by-dstport",
-			tmpl: `apiVersion: security.istio.io/v1beta1
- kind: AuthorizationPolicy
- metadata:
-   name: deny-by-dstport
- spec:
-   selector:
-	 matchLabels:
-	   app: fortio-server
-   action: DENY
-   rules:
-   - to:
-	 - operation:
-		 ports: ["8080"]`,
-			params:  nil,
-			target:  fmt.Sprintf("%s:8080", serverIP),
-			logKeys: []string{"port 8080", "action: DENY"},
-		},
-		{
-			name: "deny-by-srcip",
-			tmpl: `apiVersion: security.istio.io/v1beta1
- kind: AuthorizationPolicy
- metadata:
-   name: deny-by-srcip
- spec:
-   selector:
-	 matchLabels:
-	   app: fortio-server
-   action: DENY
-   rules:
-   - from:
-	 - source:
-		 ipBlocks: ["{{.ClientIP}}"]`,
-			params:  map[string]string{"ClientIP": clientIP},
-			target:  fmt.Sprintf("%s:8080", serverIP),
-			logKeys: []string{"srcip", "action: DENY"},
-		},
-		{
-			name: "deny-by-dstip",
-			tmpl: `apiVersion: security.istio.io/v1beta1
- kind: AuthorizationPolicy
- metadata:
-   name: deny-by-dstip
- spec:
-   selector:
-	 matchLabels:
-	   app: fortio-server
-   action: DENY
-   rules:
-   - when:
-	 - key: destination.ip
-	   values: ["{{.ServerIP}}"]`,
-			params:  map[string]string{"ServerIP": serverIP},
-			target:  fmt.Sprintf("%s:8080", serverIP),
-			logKeys: []string{"dstip", "action: DENY"},
-		},
-	}
+		// Attempt to connect from fortio-client to fortio-server (client IP is denied)
+		targetURL := fmt.Sprintf("http://fortio-server.default:8078")
+		output, err := runFortioFromClient(targetURL)
+		t.Logf("Fortio output:\n%s", output)
+		if err == nil {
+			t.Errorf("Fortio client request unexpectedly succeeded (expected denial)")
+		}
 
-	for _, sc := range scenarios {
-		sc := sc
-		t.Run(sc.name, func(t *testing.T) {
-			rendered, err := renderTemplate(sc.tmpl, sc.params)
-			if err != nil {
-				t.Fatalf("render %s: %v", sc.name, err)
-			}
-			fmt.Printf("DEBUG: Rendered %s policy:\n%s\n", sc.name, rendered)
-			if err := applyDocs(rendered); err != nil {
-				t.Fatalf("apply %s policy: %v", sc.name, err)
-			}
-			defer deleteRes("authorizationpolicy", sc.name, ns)
+		// Verify Kmesh logs contain policy name
+		logs, _ := exec.Command("kubectl", "logs", "-n", "kmesh-system", "-l", "app=kmesh", "--tail=100").CombinedOutput()
+		if !strings.Contains(string(logs), "deny-by-srcip") {
+			t.Errorf("Kmesh logs do not contain expected deny-by-srcip entry")
+		}
+	})
 
-			time.Sleep(3 * time.Second) // allow policy propagation
+	// Scenario 3: Deny by destination IP
+	t.Run("deny-by-dstip", func(t *testing.T) {
+		t.Logf("Applying deny-by-dstip policy (deny traffic to destination IP %s)...", serverIP)
+		kubectlApply(t, policyByDstIP)
+		defer kubectlDelete(t, policyByDstIP)
+		time.Sleep(2 * time.Second)
 
-			out, _ := osExec.Command("kubectl", "exec", "-n", ns, clientPod, "--",
-				"fortio", "load", "-c", "1", "-n", "1", "-qps", "0", sc.target).
-				CombinedOutput()
-			fmt.Printf("DEBUG: Fortio output for %s:\n%s\n", sc.name, out)
-			if !strings.Contains(string(out), "Code -1") {
-				t.Fatalf("expected denial for %s, got:\n%s", sc.name, out)
-			}
+		// Attempt to connect from fortio-client directly to server Pod IP on port 8078
+		targetURL := fmt.Sprintf("http://%s:8078", serverIP)
+		output, err := runFortioFromClient(targetURL)
+		t.Logf("Fortio output:\n%s", output)
+		if err == nil {
+			t.Errorf("Fortio client request unexpectedly succeeded (expected denial)")
+		}
 
-			kmeshPod := podName("kmesh-system", "")
-			logs, _ := osExec.Command("kubectl", "logs", "-n", "kmesh-system", kmeshPod).CombinedOutput()
-			fmt.Printf("DEBUG: KMesh logs for %s:\n%s\n", sc.name, logs)
-			for _, key := range sc.logKeys {
-				if !strings.Contains(string(logs), key) {
-					t.Fatalf("%s: missing log key %q", sc.name, key)
-				}
-			}
-		})
-	}
+		// Check Kmesh logs for denial entry
+		logs, _ := exec.Command("kubectl", "logs", "-n", "kmesh-system", "-l", "app=kmesh", "--tail=100").CombinedOutput()
+		if !strings.Contains(string(logs), "deny-by-dstip") {
+			t.Errorf("Kmesh logs do not contain expected deny-by-dstip entry")
+		}
+	})
 }
