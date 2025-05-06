@@ -15,35 +15,76 @@ import (
 	"time"
 )
 
-// Helper to apply a Kubernetes manifest via kubectl
+// kubectlApply applies a manifest via stdin to kubectl apply,
+// failing the test with full output on error.
 func kubectlApply(t *testing.T, manifest string) {
+	t.Logf("DEBUG: Applying manifest:\n%s\n---", manifest)
 	cmd := exec.Command("kubectl", "apply", "-f", "-")
 	cmd.Stdin = strings.NewReader(manifest)
 	out, err := cmd.CombinedOutput()
+	t.Logf("DEBUG: kubectl apply output:\n%s", out)
 	if err != nil {
-		t.Fatalf("Failed to apply manifest: %v\nOutput: %s", err, string(out))
+		t.Fatalf("kubectl apply failed: %v\nOutput:\n%s", err, string(out))
 	}
 }
 
-// Helper to delete resources defined in a manifest via kubectl
+// kubectlDelete deletes resources via stdin to kubectl delete.
+// It logs errors but does not fail the test, ensuring best-effort cleanup.
 func kubectlDelete(t *testing.T, manifest string) {
+	t.Logf("DEBUG: Deleting resources defined in manifest...")
 	cmd := exec.Command("kubectl", "delete", "-f", "-")
 	cmd.Stdin = strings.NewReader(manifest)
-	_ = cmd.Run() // no need to fail test if cleanup fails
-}
-
-// Helper to wait for a deployment to be ready
-func waitDeploymentReady(t *testing.T, name string) {
-	cmd := exec.Command("kubectl", "rollout", "status", "deployment/"+name, "--timeout=60s")
 	out, err := cmd.CombinedOutput()
+	t.Logf("DEBUG: kubectl delete output:\n%s", out)
 	if err != nil {
-		t.Fatalf("Deployment %s not ready in time: %v\nOutput: %s", name, err, string(out))
+		t.Logf("WARN: kubectl delete encountered an error (ignored): %v", err)
 	}
 }
 
+// waitDeploymentReady waits up to 60s for the named Deployment to have at least 1 AvailableReplica.
+// On failure, it gathers extra debug info (describe, pod list, pod logs) before failing.
+func waitDeploymentReady(t *testing.T, name string) {
+	t.Logf("DEBUG: Waiting for Deployment %q to become ready (60s timeout)...", name)
+
+	// 1) Check rollout status
+	rollCmd := exec.Command("kubectl", "rollout", "status", "deployment/"+name, "--timeout=60s")
+	if out, err := rollCmd.CombinedOutput(); err != nil {
+		t.Logf("DEBUG: rollout status output:\n%s", out)
+
+		// 2) Describe Deployment for events and conditions
+		descOut, _ := exec.Command("kubectl", "describe", "deployment", name).CombinedOutput()
+		t.Logf("DEBUG: describe deployment %q:\n%s", name, descOut)
+
+		// 3) List Pods with their status
+		podsOut, _ := exec.Command("kubectl", "get", "pods", "-l", "app="+name, "-o", "wide").CombinedOutput()
+		t.Logf("DEBUG: pods for Deployment %q:\n%s", name, podsOut)
+
+		// 4) Fetch logs from the first Pod
+		podNameBytes, _ := exec.Command("kubectl", "get", "pods",
+			"-l", "app="+name,
+			"-o", "jsonpath={.items[0].metadata.name}").Output()
+		podName := strings.TrimSpace(string(podNameBytes))
+		if podName != "" {
+			logsOut, _ := exec.Command("kubectl", "logs", podName).CombinedOutput()
+			t.Logf("DEBUG: logs from Pod %q:\n%s", podName, logsOut)
+		}
+
+		// 5) Fail the test with the rollout error
+		t.Fatalf("Deployment %q not ready in time: %v", name, err)
+	}
+
+	t.Logf("DEBUG: Deployment %q is now ready.", name)
+}
+
+// TestTCPAuthorizationXDP runs three AuthorizationPolicy scenarios:
+//  1) deny-by-dstport
+//  2) deny-by-srcip
+//  3) deny-by-dstip
 func TestTCPAuthorizationXDP(t *testing.T) {
-	// Define YAML manifests for Fortio server deployment, service, and client deployment
-	serverDeploymentYAML := `apiVersion: apps/v1
+	const namespace = "default"
+
+	// 1) Deploy Fortio server
+	serverYAML := `apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: fortio-server
@@ -62,15 +103,16 @@ spec:
       containers:
       - name: fortio-server
         image: fortio/fortio:latest
-        args: ["server", "-grpc-port", "0", "-udp-port", "0", "-http-port", "8078"]
+        args: ["server", "-http-port", "8078"]
         ports:
         - containerPort: 8078
-          protocol: TCP
 `
+	// 2) Service for Fortio server
 	serviceYAML := `apiVersion: v1
 kind: Service
 metadata:
   name: fortio-server
+  namespace: default
 spec:
   selector:
     app: fortio-server
@@ -80,7 +122,8 @@ spec:
     port: 8078
     targetPort: 8078
 `
-	clientDeploymentYAML := `apiVersion: apps/v1
+	// 3) Deploy Fortio client
+	clientYAML := `apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: fortio-client
@@ -99,37 +142,39 @@ spec:
       containers:
       - name: fortio-client
         image: fortio/fortio:latest
-        command: ["/bin/bash", "-c", "sleep 3600"]
+        command: ["sleep", "3600"]
 `
 
-	// Apply Fortio server deployment and service, and Fortio client deployment
-	t.Log("Deploying Fortio server and client workloads...")
-	kubectlApply(t, serverDeploymentYAML)
+	t.Log("DEBUG: Deploying Fortio server and client resources...")
+	kubectlApply(t, serverYAML)
 	kubectlApply(t, serviceYAML)
-	kubectlApply(t, clientDeploymentYAML)
-	// Ensure cleanup at the end
-	defer kubectlDelete(t, clientDeploymentYAML)
-	defer kubectlDelete(t, serviceYAML)
-	defer kubectlDelete(t, serverDeploymentYAML)
+	kubectlApply(t, clientYAML)
 
-	// Wait for fortio-server and fortio-client pods to be ready
+	// Ensure cleanup at the end of the test
+	defer kubectlDelete(t, clientYAML)
+	defer kubectlDelete(t, serviceYAML)
+	defer kubectlDelete(t, serverYAML)
+
+	// Wait for deployments to become ready
 	waitDeploymentReady(t, "fortio-server")
 	waitDeploymentReady(t, "fortio-client")
 
-	// Retrieve the Fortio client and server Pod IP addresses for policy rules
-	clientIPBytes, err := exec.Command("kubectl", "get", "pod", "-l", "app=fortio-client", "-o", "jsonpath={.items[0].status.podIP}").Output()
+	// Retrieve Pod IPs for use in policy templates
+	clientIPBytes, err := exec.Command("kubectl", "get", "pod", "-l", "app=fortio-client",
+		"-o", "jsonpath={.items[0].status.podIP}").Output()
 	if err != nil {
-		t.Fatalf("Failed to get fortio-client Pod IP: %v", err)
+		t.Fatalf("Failed to get fortio-client IP: %v", err)
 	}
-	serverIPBytes, err := exec.Command("kubectl", "get", "pod", "-l", "app=fortio-server", "-o", "jsonpath={.items[0].status.podIP}").Output()
+	serverIPBytes, err := exec.Command("kubectl", "get", "pod", "-l", "app=fortio-server",
+		"-o", "jsonpath={.items[0].status.podIP}").Output()
 	if err != nil {
-		t.Fatalf("Failed to get fortio-server Pod IP: %v", err)
+		t.Fatalf("Failed to get fortio-server IP: %v", err)
 	}
 	clientIP := strings.TrimSpace(string(clientIPBytes))
 	serverIP := strings.TrimSpace(string(serverIPBytes))
-	t.Logf("Fortio client Pod IP: %s, server Pod IP: %s", clientIP, serverIP)
+	t.Logf("DEBUG: fortio-client IP=%s, fortio-server IP=%s", clientIP, serverIP)
 
-	// Define AuthorizationPolicy YAMLs for each scenario, inserting the retrieved IPs
+	// Define the AuthorizationPolicy manifests, injecting the Pod IPs
 	policyByDstPort := `apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
@@ -142,6 +187,7 @@ spec:
     - operation:
         ports: ["8078"]
 `
+
 	policyBySrcIP := fmt.Sprintf(`apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
@@ -154,6 +200,7 @@ spec:
     - source:
         ipBlocks: ["%s/32"]
 `, clientIP)
+
 	policyByDstIP := fmt.Sprintf(`apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
@@ -167,84 +214,81 @@ spec:
         ipBlocks: ["%s/32"]
 `, serverIP)
 
-	// Helper function to run a Fortio request from the client pod and return output and error
-	runFortioFromClient := func(target string) (string, error) {
-		// Get the client pod name
-		podNameBytes, err := exec.Command("kubectl", "get", "pods", "-l", "app=fortio-client", "-o", "jsonpath={.items[0].metadata.name}").Output()
-		if err != nil {
-			return "", fmt.Errorf("failed to get fortio-client pod name: %v", err)
-		}
-		podName := strings.TrimSpace(string(podNameBytes))
-		// Execute a single Fortio request to the target from the client pod
-		cmd := exec.Command("kubectl", "exec", podName, "--", "fortio", "load", "-qps", "0", "-n", "1", "-timeout", "5s", target)
-		output, err := cmd.CombinedOutput()
-		return string(output), err
+	// Helper to run a Fortio HTTP request from the client Pod
+	runFortio := func(target string) (string, error) {
+		// Fetch the client pod name
+		podBytes, _ := exec.Command("kubectl", "get", "pods",
+			"-l", "app=fortio-client",
+			"-o", "jsonpath={.items[0].metadata.name}").Output()
+		podName := strings.TrimSpace(string(podBytes))
+		t.Logf("DEBUG: Executing Fortio load against %s from Pod %s", target, podName)
+
+		cmd := exec.Command("kubectl", "exec", podName, "--",
+			"fortio", "load", "-qps", "0", "-n", "1", "-timeout", "5s", target)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
 	}
 
-	// Scenario 1: Deny by destination port
+	// Scenario 1: deny-by-dstport
 	t.Run("deny-by-dstport", func(t *testing.T) {
-		t.Log("Applying deny-by-dstport policy (deny traffic to port 8078)...")
+		t.Log("DEBUG: Applying deny-by-dstport policy...")
 		kubectlApply(t, policyByDstPort)
 		defer kubectlDelete(t, policyByDstPort)
-		// Give a moment for policy to propagate
-		time.Sleep(2 * time.Second)
+		time.Sleep(2 * time.Second) // allow policy propagation
 
-		// Attempt to connect from fortio-client to fortio-server service (port 8078 should be denied)
-		targetURL := fmt.Sprintf("http://fortio-server.default:8078")
-		output, err := runFortioFromClient(targetURL)
-		t.Logf("Fortio output:\n%s", output)
+		// Attempt request to service name (should be denied)
+		output, err := runFortio("http://fortio-server.default:8078")
+		t.Logf("DEBUG: Fortio output:\n%s", output)
 		if err == nil {
-			t.Errorf("Fortio client request unexpectedly succeeded (expected denial)")
+			t.Errorf("Expected request to be denied, but it succeeded")
 		}
 
-		// Check Kmesh logs for evidence of denial by this policy
-		logs, _ := exec.Command("kubectl", "logs", "-n", "kmesh-system", "-l", "app=kmesh", "--tail=100").CombinedOutput()
+		// Inspect Kmesh logs for the policy name
+		logs, _ := exec.Command("kubectl", "logs", "-n", "kmesh-system",
+			"-l", "app=kmesh", "--tail=50").CombinedOutput()
 		if !strings.Contains(string(logs), "deny-by-dstport") {
-			t.Errorf("Kmesh logs do not contain expected deny-by-dstport entry")
+			t.Errorf("Expected Kmesh logs to contain 'deny-by-dstport', got:\n%s", logs)
 		}
 	})
 
-	// Scenario 2: Deny by source IP
+	// Scenario 2: deny-by-srcip
 	t.Run("deny-by-srcip", func(t *testing.T) {
-		t.Logf("Applying deny-by-srcip policy (deny traffic from source IP %s)...", clientIP)
+		t.Logf("DEBUG: Applying deny-by-srcip policy (source IP %s)...", clientIP)
 		kubectlApply(t, policyBySrcIP)
 		defer kubectlDelete(t, policyBySrcIP)
 		time.Sleep(2 * time.Second)
 
-		// Attempt to connect from fortio-client to fortio-server (client IP is denied)
-		targetURL := fmt.Sprintf("http://fortio-server.default:8078")
-		output, err := runFortioFromClient(targetURL)
-		t.Logf("Fortio output:\n%s", output)
+		output, err := runFortio("http://fortio-server.default:8078")
+		t.Logf("DEBUG: Fortio output:\n%s", output)
 		if err == nil {
-			t.Errorf("Fortio client request unexpectedly succeeded (expected denial)")
+			t.Errorf("Expected request to be denied by source IP policy")
 		}
 
-		// Verify Kmesh logs contain policy name
-		logs, _ := exec.Command("kubectl", "logs", "-n", "kmesh-system", "-l", "app=kmesh", "--tail=100").CombinedOutput()
+		logs, _ := exec.Command("kubectl", "logs", "-n", "kmesh-system",
+			"-l", "app=kmesh", "--tail=50").CombinedOutput()
 		if !strings.Contains(string(logs), "deny-by-srcip") {
-			t.Errorf("Kmesh logs do not contain expected deny-by-srcip entry")
+			t.Errorf("Expected Kmesh logs to contain 'deny-by-srcip', got:\n%s", logs)
 		}
 	})
 
-	// Scenario 3: Deny by destination IP
+	// Scenario 3: deny-by-dstip
 	t.Run("deny-by-dstip", func(t *testing.T) {
-		t.Logf("Applying deny-by-dstip policy (deny traffic to destination IP %s)...", serverIP)
+		t.Logf("DEBUG: Applying deny-by-dstip policy (destination IP %s)...", serverIP)
 		kubectlApply(t, policyByDstIP)
 		defer kubectlDelete(t, policyByDstIP)
 		time.Sleep(2 * time.Second)
 
-		// Attempt to connect from fortio-client directly to server Pod IP on port 8078
-		targetURL := fmt.Sprintf("http://%s:8078", serverIP)
-		output, err := runFortioFromClient(targetURL)
-		t.Logf("Fortio output:\n%s", output)
+		// Direct Pod IP request (should be denied)
+		output, err := runFortio(fmt.Sprintf("http://%s:8078", serverIP))
+		t.Logf("DEBUG: Fortio output:\n%s", output)
 		if err == nil {
-			t.Errorf("Fortio client request unexpectedly succeeded (expected denial)")
+			t.Errorf("Expected request to Pod IP to be denied by dst IP policy")
 		}
 
-		// Check Kmesh logs for denial entry
-		logs, _ := exec.Command("kubectl", "logs", "-n", "kmesh-system", "-l", "app=kmesh", "--tail=100").CombinedOutput()
+		logs, _ := exec.Command("kubectl", "logs", "-n", "kmesh-system",
+			"-l", "app=kmesh", "--tail=50").CombinedOutput()
 		if !strings.Contains(string(logs), "deny-by-dstip") {
-			t.Errorf("Kmesh logs do not contain expected deny-by-dstip entry")
+			t.Errorf("Expected Kmesh logs to contain 'deny-by-dstip', got:\n%s", logs)
 		}
 	})
 }
