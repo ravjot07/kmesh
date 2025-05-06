@@ -142,7 +142,7 @@ spec:
       containers:
       - name: fortio-client
         image: fortio/fortio:latest
-        command: ["sleep", "3600"]
+        command: ["fortio", "version"]
 `
 
 	t.Log("DEBUG: Deploying Fortio server and client resources...")
