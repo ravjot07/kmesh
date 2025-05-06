@@ -1,4 +1,3 @@
-//go:build integ
 // +build integ
 
 /*
@@ -211,7 +210,7 @@
 			   containers:
 			   - name: fortio-client
 				 image: fortio/fortio:latest
-        		 command: ["sleep","3600"]
+				 command: ["sleep","3600"]
 	 `
 	 rendered, err = renderTemplate(clientTmpl, nil)
 	 if err != nil {
@@ -332,4 +331,3 @@
 		 })
 	 }
  }
- 
