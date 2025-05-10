@@ -112,24 +112,25 @@ function setup_istio() {
 }
 
 function setup_kmesh() {
-    helm install kmesh $ROOT_DIR/deploy/charts/kmesh-helm -n kmesh-system --create-namespace --set deploy.kmesh.image.repository=localhost:5000/kmesh \
-    --set deploy.kmesh.containers.kmeshDaemonArgs="--mode=dual-engine --enable-bypass=false --monitoring=true"
+    helm install kmesh $ROOT_DIR/deploy/charts/kmesh-helm \
+        -n kmesh-system --create-namespace \
+        --set deploy.kmesh.image.repository=localhost:5000/kmesh \
+        --set deploy.kmesh.containers.kmeshDaemonArgs="--mode=dual-engine --enable-bpf-log=true --enable-bypass=false --monitoring=true"
 
     # Wait for all Kmesh pods to be ready.
     while true; do
-        pod_statuses=$(kubectl get pods -n kmesh-system -l app=kmesh -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{"\n"}{end}')
+        pod_statuses=$(kubectl get pods -n kmesh-system -l app=kmesh \
+            -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{"\n"}{end}')
 
         running_pods=0
         total_pods=0
 
         while read -r pod_name pod_status; do
             total_pods=$((total_pods + 1))
-            if [ "$pod_status" = "Running" ]; then
-                running_pods=$((running_pods + 1))
-            fi
+            [[ "$pod_status" == "Running" ]] && running_pods=$((running_pods + 1))
         done <<< "$pod_statuses"
 
-        if [ "$running_pods" -eq "$total_pods" ]; then
+        if [[ "$running_pods" -eq "$total_pods" ]]; then
             echo "All pods of Kmesh daemon are in Running state."
             break
         fi
@@ -138,6 +139,7 @@ function setup_kmesh() {
         sleep 1
     done
 }
+
 
 export KIND_REGISTRY_NAME="kind-registry"
 export KIND_REGISTRY_PORT="5000"
@@ -211,6 +213,22 @@ function cleanup_docker_registry() {
     docker rm "${KIND_REGISTRY_NAME}" || echo "Failed to remove or no such registry '${KIND_REGISTRY_NAME}'."
 }
 
+TMPBIN="${TMPBIN:-$(mktemp -d)/bin}"
+mkdir -p "$TMPBIN"
+export PATH="$PATH:$TMPBIN"
+
+# Function to install kmeshctl into the test environment.
+function install_kmeshctl() {
+    echo "Installing kmeshctl CLI into test environment..."
+    if [[ -f "$ROOT_DIR/kmeshctl" ]]; then
+        cp "$ROOT_DIR/kmeshctl" "$TMPBIN/"  # Copy the binary to TMPBIN, which is on PATH.
+        echo "kmeshctl installed successfully in $TMPBIN."
+    else
+        echo "Error: kmeshctl binary not found in $ROOT_DIR. Please build it before running E2E tests." >&2
+        return 1
+    fi
+}
+
 PARAMS=()
 
 while (( "$#" )); do
@@ -274,6 +292,9 @@ fi
 if [[ -z "${SKIP_BUILD:-}" ]]; then
     setup_kind_registry
     build_and_push_images
+    echo "Building kmeshctl CLI..."
+    make kmeshctl || { echo "Failed to build kmeshctl" >&2; exit 1; }
+    install_kmeshctl || { echo "Failed to install kmeshctl into PATH" >&2; exit 1; }
 fi
 
 kubectl config use-context "kind-$NAME"
