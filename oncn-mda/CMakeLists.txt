@@ -6,6 +6,7 @@ project(macli LANGUAGES C)
 set(CMAKE_VERBOSE_MAKEFILE ON)
 
 include_directories("${PROJECT_SOURCE_DIR}/include")
+include_directories("${CMAKE_SOURCE_DIR}/depends/include")
 
 set(DEPLOY_PROGRAM "${PROJECT_SOURCE_DIR}/deploy")
 
