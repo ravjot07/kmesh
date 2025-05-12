@@ -17,6 +17,7 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"reflect"
@@ -27,6 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"kmesh.net/kmesh/api/v2/workloadapi"
+	"kmesh.net/kmesh/pkg/constants"
 	"kmesh.net/kmesh/pkg/controller/workload/cache"
 	"kmesh.net/kmesh/pkg/nets"
 )
@@ -306,7 +308,7 @@ func TestBuildMetricsToPrometheus(t *testing.T) {
 				workloadMetricCache: map[workloadMetricLabels]*workloadMetricInfo{},
 				serviceMetricCache:  map[serviceMetricLabels]*serviceMetricInfo{},
 			}
-			m.updateWorkloadMetricCache(tt.args.data, tt.args.labels, tt.args.tcpConns)
+			m.updateWorkloadMetricCache(tt.args.data, tt.args.labels, tt.args.tcpConns[tt.args.data.conSrcDstInfo])
 			assert.Equal(t, m.workloadMetricCache[tt.args.labels].WorkloadConnClosed, tt.want[0])
 			assert.Equal(t, m.workloadMetricCache[tt.args.labels].WorkloadConnOpened, tt.want[1])
 			assert.Equal(t, m.workloadMetricCache[tt.args.labels].WorkloadConnReceivedBytes, tt.want[2])
@@ -440,7 +442,7 @@ func TestBuildServiceMetricsToPrometheus(t *testing.T) {
 				workloadMetricCache: map[workloadMetricLabels]*workloadMetricInfo{},
 				serviceMetricCache:  map[serviceMetricLabels]*serviceMetricInfo{},
 			}
-			m.updateServiceMetricCache(tt.args.data, tt.args.labels, tt.args.tcpConns)
+			m.updateServiceMetricCache(tt.args.data, tt.args.labels, tt.args.tcpConns[tt.args.data.conSrcDstInfo])
 			assert.Equal(t, m.serviceMetricCache[tt.args.labels].ServiceConnClosed, tt.want[0])
 			assert.Equal(t, m.serviceMetricCache[tt.args.labels].ServiceConnOpened, tt.want[1])
 			assert.Equal(t, m.serviceMetricCache[tt.args.labels].ServiceConnReceivedBytes, tt.want[2])
@@ -534,7 +536,7 @@ func TestBuildConnectionMetricsToPrometheus(t *testing.T) {
 					receivedBytes: 0x0000004,
 					packetLost:    0x0000001,
 					totalRetrans:  0x0000002,
-					state:         TCP_CLOSTED,
+					state:         TCP_CLOSED,
 				},
 				labels: connectionMetricLabels{
 					reporter:                     "source",
@@ -1674,6 +1676,101 @@ func TestMetricController_updatePrometheusMetric(t *testing.T) {
 				index = index + 1
 			}
 			cancel()
+		})
+	}
+}
+
+func TestBuildV4Metric(t *testing.T) {
+	buff := bytes.NewBuffer([]byte{10, 244, 1, 13, 10, 244, 1, 12, 34, 208, 144, 31, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 96, 46, 224, 144, 31, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		0, 3, 0, 0, 0, 147, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 167, 122, 203, 84, 2, 0, 0, 0, 153, 163,
+		210, 202, 232, 184, 0, 0, 64, 30, 158, 31, 235, 184, 0, 0, 0, 0, 0, 0, 150, 158, 0, 0, 19, 0, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0})
+	data := requestMetric{
+
+		conSrcDstInfo: connectionSrcDst{
+			src:       [4]uint32{218231818, 0, 0, 0},
+			dst:       [4]uint32{201454602, 0, 0, 0},
+			direction: constants.OUTBOUND,
+			srcPort:   53282,
+			dstPort:   8080,
+		},
+		origDstAddr:    [4]uint32{3761135626, 0, 0, 0},
+		origDstPort:    8080,
+		direction:      constants.OUTBOUND,
+		receivedBytes:  147,
+		sentBytes:      3,
+		state:          1,
+		success:        1,
+		duration:       10012555943,
+		startTime:      203309974725529,
+		lastReportTime: 203319987281472,
+		srtt:           40598,
+		minRtt:         19,
+		totalRetrans:   0,
+		packetLost:     0,
+	}
+
+	tests := []struct {
+		name          string
+		tcpConns      map[connectionSrcDst]connMetric
+		newConnMetric connMetric
+	}{
+		{
+			name:     "v4 metric test, tcpConn is empty",
+			tcpConns: map[connectionSrcDst]connMetric{},
+			newConnMetric: connMetric{
+				receivedBytes: 147,
+				sentBytes:     3,
+				packetLost:    0,
+				totalRetrans:  0,
+				totalReports:  1,
+			},
+		},
+		{
+			name: "v4 metric test, tcpConns in not empty",
+			tcpConns: map[connectionSrcDst]connMetric{
+				data.conSrcDstInfo: {
+					receivedBytes: 1,
+					sentBytes:     1,
+					packetLost:    0,
+					totalRetrans:  0,
+					totalReports:  1,
+				},
+			},
+			newConnMetric: connMetric{
+				receivedBytes: 147,
+				sentBytes:     3,
+				packetLost:    0,
+				totalRetrans:  0,
+				totalReports:  2,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			copiedBytes := make([]byte, len(buff.Bytes()))
+			copy(copiedBytes, buff.Bytes())
+
+			copiedBuff := bytes.NewBuffer(copiedBytes)
+			prevTcpConns := make(map[connectionSrcDst]connMetric)
+			for k, v := range tt.tcpConns {
+				prevTcpConns[k] = v
+			}
+
+			got, err := buildV4Metric(copiedBuff, tt.tcpConns)
+			if err != nil {
+				t.Errorf("buildV4Metric() error = %v", err)
+			}
+			assert.Equal(t, tt.newConnMetric, tt.tcpConns[data.conSrcDstInfo])
+
+			temp := data
+			temp.sentBytes = temp.sentBytes - prevTcpConns[temp.conSrcDstInfo].sentBytes
+			temp.receivedBytes = temp.receivedBytes - prevTcpConns[temp.conSrcDstInfo].receivedBytes
+			temp.packetLost = temp.packetLost - prevTcpConns[temp.conSrcDstInfo].packetLost
+			temp.totalRetrans = temp.totalRetrans - prevTcpConns[temp.conSrcDstInfo].totalRetrans
+			assert.Equal(t, temp, got)
 		})
 	}
 }

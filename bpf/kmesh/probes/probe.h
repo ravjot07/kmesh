@@ -9,7 +9,7 @@
 
 #define LONG_CONN_THRESHOLD_TIME (5 * 1000000000ULL) // 5s
 
-volatile __u32 enable_monitoring = 0;
+volatile __u32 enable_monitoring = 1;
 
 static inline bool is_monitoring_enable()
 {
@@ -77,7 +77,7 @@ static inline void observe_on_close(struct bpf_sock *sk)
 
     storage = bpf_sk_storage_get(&map_of_sock_storage, sk, 0, 0);
     if (!storage) {
-        BPF_LOG(ERR, PROBE, "on close: bpf_sk_storage_get failed\n");
+        // maybe the connection is established before kmesh start
         return;
     }
 
@@ -90,13 +90,14 @@ static inline void observe_on_data(struct bpf_sock *sk)
     struct sock_storage_data *storage = NULL;
     if (!sk)
         return;
+
     tcp_sock = bpf_tcp_sock(sk);
     if (!tcp_sock)
         return;
 
     storage = bpf_sk_storage_get(&map_of_sock_storage, sk, 0, 0);
     if (!storage) {
-        BPF_LOG(ERR, PROBE, "on data: bpf_sk_storage_get failed\n");
+        // maybe the connection is established before kmesh start
         return;
     }
     __u64 now = bpf_ktime_get_ns();

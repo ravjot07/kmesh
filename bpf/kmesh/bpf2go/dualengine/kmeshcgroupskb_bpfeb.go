@@ -117,21 +117,22 @@ type KmeshCgroupSkbMapSpecs struct {
 	KmPerfMap     *ebpf.MapSpec `ebpf:"km_perf_map"`
 	KmService     *ebpf.MapSpec `ebpf:"km_service"`
 	KmSockstorage *ebpf.MapSpec `ebpf:"km_sockstorage"`
+	KmTcpProbe    *ebpf.MapSpec `ebpf:"km_tcp_probe"`
 	KmTmpbuf      *ebpf.MapSpec `ebpf:"km_tmpbuf"`
 	KmWlpolicy    *ebpf.MapSpec `ebpf:"km_wlpolicy"`
 	KmeshMap1600  *ebpf.MapSpec `ebpf:"kmesh_map1600"`
 	KmeshMap192   *ebpf.MapSpec `ebpf:"kmesh_map192"`
 	KmeshMap296   *ebpf.MapSpec `ebpf:"kmesh_map296"`
 	KmeshMap64    *ebpf.MapSpec `ebpf:"kmesh_map64"`
-	MapOfTcpProbe *ebpf.MapSpec `ebpf:"map_of_tcp_probe"`
 }
 
 // KmeshCgroupSkbVariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type KmeshCgroupSkbVariableSpecs struct {
-	BpfLogLevel      *ebpf.VariableSpec `ebpf:"bpf_log_level"`
-	EnableMonitoring *ebpf.VariableSpec `ebpf:"enable_monitoring"`
+	BpfLogLevel          *ebpf.VariableSpec `ebpf:"bpf_log_level"`
+	EnableMonitoring     *ebpf.VariableSpec `ebpf:"enable_monitoring"`
+	EnablePeriodicReport *ebpf.VariableSpec `ebpf:"enable_periodic_report"`
 }
 
 // KmeshCgroupSkbObjects contains all objects after they have been loaded into the kernel.
@@ -165,13 +166,13 @@ type KmeshCgroupSkbMaps struct {
 	KmPerfMap     *ebpf.Map `ebpf:"km_perf_map"`
 	KmService     *ebpf.Map `ebpf:"km_service"`
 	KmSockstorage *ebpf.Map `ebpf:"km_sockstorage"`
+	KmTcpProbe    *ebpf.Map `ebpf:"km_tcp_probe"`
 	KmTmpbuf      *ebpf.Map `ebpf:"km_tmpbuf"`
 	KmWlpolicy    *ebpf.Map `ebpf:"km_wlpolicy"`
 	KmeshMap1600  *ebpf.Map `ebpf:"kmesh_map1600"`
 	KmeshMap192   *ebpf.Map `ebpf:"kmesh_map192"`
 	KmeshMap296   *ebpf.Map `ebpf:"kmesh_map296"`
 	KmeshMap64    *ebpf.Map `ebpf:"kmesh_map64"`
-	MapOfTcpProbe *ebpf.Map `ebpf:"map_of_tcp_probe"`
 }
 
 func (m *KmeshCgroupSkbMaps) Close() error {
@@ -187,13 +188,13 @@ func (m *KmeshCgroupSkbMaps) Close() error {
 		m.KmPerfMap,
 		m.KmService,
 		m.KmSockstorage,
+		m.KmTcpProbe,
 		m.KmTmpbuf,
 		m.KmWlpolicy,
 		m.KmeshMap1600,
 		m.KmeshMap192,
 		m.KmeshMap296,
 		m.KmeshMap64,
-		m.MapOfTcpProbe,
 	)
 }
 
@@ -201,8 +202,9 @@ func (m *KmeshCgroupSkbMaps) Close() error {
 //
 // It can be passed to LoadKmeshCgroupSkbObjects or ebpf.CollectionSpec.LoadAndAssign.
 type KmeshCgroupSkbVariables struct {
-	BpfLogLevel      *ebpf.Variable `ebpf:"bpf_log_level"`
-	EnableMonitoring *ebpf.Variable `ebpf:"enable_monitoring"`
+	BpfLogLevel          *ebpf.Variable `ebpf:"bpf_log_level"`
+	EnableMonitoring     *ebpf.Variable `ebpf:"enable_monitoring"`
+	EnablePeriodicReport *ebpf.Variable `ebpf:"enable_periodic_report"`
 }
 
 // KmeshCgroupSkbPrograms contains all programs after they have been loaded into the kernel.
