@@ -209,21 +209,10 @@ function cleanup_docker_registry() {
 	docker rm "${KIND_REGISTRY_NAME}" || echo "Failed to remove or no such registry '${KIND_REGISTRY_NAME}'."
 }
 
-TMPBIN="${TMPBIN:-$(mktemp -d)/bin}"
-mkdir -p "$TMPBIN"
-export PATH="$PATH:$TMPBIN"
-
-
 # Function to install kmeshctl into the test environment.
 function install_kmeshctl() {
-   echo "Installing kmeshctl CLI into test environment..."
-   if [[ -f "$ROOT_DIR/kmeshctl" ]]; then
-       cp "$ROOT_DIR/kmeshctl" "$TMPBIN/"  
-       echo "kmeshctl installed successfully in $TMPBIN."
-   else
-       echo "Error: kmeshctl binary not found in $ROOT_DIR. Please build it before running E2E tests." >&2
-       return 1
-   fi
+    echo "Copying kmeshctl CLI into test environment..."
+    cp "$ROOT_DIR/kmeshctl" "$TMPBIN/"
 }
 
 
