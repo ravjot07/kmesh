@@ -61,16 +61,6 @@ func runCtlCmd(t *testing.T, subcmd string, args ...string) (string, error) {
 
 // Package‐level init ensures Kmesh is ready before any tests run.
 func init() {
-	// 1) Wait up to 2 minutes for all Kmesh pods to become Ready.
-	wait := exec.Command("kubectl", "-n", kmeshNamespace, "wait",
-		"--for=condition=Ready", "pod", "-l", "app=kmesh",
-		"--timeout=2m",
-	)
-	if out, err := wait.CombinedOutput(); err != nil {
-		panic(fmt.Sprintf("❌ timed out waiting for Kmesh pods: %v\n%s",
-			err, string(out)))
-	}
-
 	// 2) Retrieve the name of the first Ready Kmesh pod.
 	getPod := exec.Command("kubectl", "-n", kmeshNamespace, "get", "pods",
 		"-l", "app=kmesh", "-o", "jsonpath={.items[0].metadata.name}")
