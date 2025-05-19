@@ -209,6 +209,13 @@ function cleanup_docker_registry() {
 	docker rm "${KIND_REGISTRY_NAME}" || echo "Failed to remove or no such registry '${KIND_REGISTRY_NAME}'."
 }
 
+# Function to install kmeshctl into the test environment.
+function install_kmeshctl() {
+    echo "Copying kmeshctl CLI into test environment..."
+    cp "$ROOT_DIR/kmeshctl" "$TMPBIN/"
+}
+
+
 PARAMS=()
 
 while (("$#")); do
@@ -269,9 +276,12 @@ if [[ -z ${SKIP_SETUP:-} ]]; then
 	setup_kind_cluster "$NAME"
 fi
 
-if [[ -z ${SKIP_BUILD:-} ]]; then
-	setup_kind_registry
-	build_and_push_images
+if [[ -z "${SKIP_BUILD:-}" ]]; then
+    setup_kind_registry
+    build_and_push_images
+    echo "Building kmeshctl CLI..."
+    make kmeshctl || { echo "Failed to build kmeshctl" >&2; exit 1; }
+    install_kmeshctl || { echo "Failed to install kmeshctl into PATH" >&2; exit 1; }
 fi
 
 kubectl config use-context "kind-$NAME"
