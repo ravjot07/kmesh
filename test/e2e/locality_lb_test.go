@@ -1,3 +1,22 @@
+//go:build integ
+// +build integ
+
+/*
+ * Copyright The Kmesh Authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at:
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package kmesh
 
 import (
@@ -13,7 +32,6 @@ import (
 	"istio.io/istio/pkg/test/util/retry"
 )
 
-// runCommand shells out and fatals on error. Logs command + output.
 func runCommand(ctx framework.TestContext, cmd string) string {
 	out, err := shell.Execute(true, cmd)
 	if err != nil {
@@ -23,7 +41,6 @@ func runCommand(ctx framework.TestContext, cmd string) string {
 	return out
 }
 
-// applyManifest writes mani to a temp file and kubectl-applies it with debug logs.
 func applyManifest(ctx framework.TestContext, ns, mani string) {
 	ctx.Logf(">>> Applying to namespace %q manifest:\n%s", ns, mani)
 	dir := ctx.CreateTmpDirectoryOrFail("kmesh-lb")
@@ -36,7 +53,6 @@ func applyManifest(ctx framework.TestContext, ns, mani string) {
 	runCommand(ctx, fmt.Sprintf("kubectl apply -n %s -f %s", ns, path))
 }
 
-// getClusterIP fetches the Service's ClusterIP, bracketed if IPv6.
 func getClusterIP(ctx framework.TestContext, ns, svc string) string {
 	ip := runCommand(ctx, fmt.Sprintf(
 		"kubectl get svc %s -n %s -o jsonpath={.spec.clusterIP}", svc, ns))
@@ -50,7 +66,6 @@ func getClusterIP(ctx framework.TestContext, ns, svc string) string {
 	return ip
 }
 
-// getSleepPod returns the name of the sleep pod in ns.
 func getSleepPod(ctx framework.TestContext, ns string) string {
 	pod := runCommand(ctx, fmt.Sprintf(
 		"kubectl get pod -n %s -l app=sleep -o jsonpath={.items[0].metadata.name}", ns))
@@ -61,14 +76,12 @@ func getSleepPod(ctx framework.TestContext, ns string) string {
 	return pod
 }
 
-// waitForDeployment waits until deployment/name in ns is Available.
 func waitForDeployment(ctx framework.TestContext, ns, name string) {
 	runCommand(ctx, fmt.Sprintf(
 		"kubectl wait --for=condition=available deployment/%s -n %s --timeout=120s",
 		name, ns))
 }
 
-// curlHello execs into sleep pod and curls the service via --resolve.
 func curlHello(ctx framework.TestContext, ns, pod, fqdn, ip string) (string, error) {
 	cmd := fmt.Sprintf(
 		"kubectl exec -n %s %s -- curl -sSL -v --resolve %s:5000:%s http://%s:5000/hello",
@@ -76,9 +89,7 @@ func curlHello(ctx framework.TestContext, ns, pod, fqdn, ip string) (string, err
 	return shell.Execute(false, cmd)
 }
 
-// ---------------------------------------------------------------------------
 // Test 1: PreferClose via annotation
-// ---------------------------------------------------------------------------
 func TestLocality_PreferClose_Annotation(t *testing.T) {
 	framework.NewTest(t).Run(func(ctx framework.TestContext) {
 		// Label nodes subzone1 (worker) & subzone2 (control-plane)
@@ -93,126 +104,125 @@ func TestLocality_PreferClose_Annotation(t *testing.T) {
 
 		// Service with PreferClose via annotation
 		applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: v1
-kind: Service
-metadata:
-  name: %s
-  namespace: %s
-  annotations:
-    networking.istio.io/traffic-distribution: PreferClose
-  labels:
-    app: helloworld
-spec:
-  selector:
-    app: helloworld
-  ports:
-  - name: http
-    port: 5000
-    targetPort: 5000
-`, svc, ns))
+ apiVersion: v1
+ kind: Service
+ metadata:
+   name: %s
+   namespace: %s
+   labels:
+     app: helloworld
+ spec:
+   selector:
+     app: helloworld
+   ports:
+   - name: http
+     port: 5000
+     targetPort: 5000
+   traficDistribution: 
+    preferClose: true
+ `, svc, ns))
 
 		// Local deployment (sub1) on worker
 		applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: helloworld-%s
-  namespace: %s
-  labels:
-    app: helloworld
-    version: %s
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: helloworld
-      version: %s
-  template:
-    metadata:
-      labels:
-        app: helloworld
-        version: %s
-    spec:
-      nodeSelector:
-        kubernetes.io/hostname: kmesh-testing-worker
-      containers:
-      - name: helloworld
-        image: docker.io/istio/examples-helloworld-v1
-        imagePullPolicy: IfNotPresent
-        env:
-        - name: SERVICE_VERSION
-          value: %s
-        ports:
-        - containerPort: 5000
-`, localVer, ns, localVer, localVer, localVer, localVer))
+ apiVersion: apps/v1
+ kind: Deployment
+ metadata:
+   name: helloworld-%s
+   namespace: %s
+   labels:
+     app: helloworld
+     version: %s
+ spec:
+   replicas: 1
+   selector:
+     matchLabels:
+       app: helloworld
+       version: %s
+   template:
+     metadata:
+       labels:
+         app: helloworld
+         version: %s
+     spec:
+       nodeSelector:
+         kubernetes.io/hostname: kmesh-testing-worker
+       containers:
+       - name: helloworld
+         image: docker.io/istio/examples-helloworld-v1
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: SERVICE_VERSION
+           value: %s
+         ports:
+         - containerPort: 5000
+ `, localVer, ns, localVer, localVer, localVer, localVer))
 
 		// Remote deployment (sub2) on control-plane (with toleration)
 		applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: helloworld-%s
-  namespace: %s
-  labels:
-    app: helloworld
-    version: %s
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: helloworld
-      version: %s
-  template:
-    metadata:
-      labels:
-        app: helloworld
-        version: %s
-    spec:
-      nodeSelector:
-        kubernetes.io/hostname: kmesh-testing-control-plane
-      tolerations:
-      - key: "node-role.kubernetes.io/control-plane"
-        operator: "Exists"
-        effect: NoSchedule
-      containers:
-      - name: helloworld
-        image: docker.io/istio/examples-helloworld-v1
-        imagePullPolicy: IfNotPresent
-        env:
-        - name: SERVICE_VERSION
-          value: %s
-        ports:
-        - containerPort: 5000
-`, remoteVer, ns, remoteVer, remoteVer, remoteVer, remoteVer))
+ apiVersion: apps/v1
+ kind: Deployment
+ metadata:
+   name: helloworld-%s
+   namespace: %s
+   labels:
+     app: helloworld
+     version: %s
+ spec:
+   replicas: 1
+   selector:
+     matchLabels:
+       app: helloworld
+       version: %s
+   template:
+     metadata:
+       labels:
+         app: helloworld
+         version: %s
+     spec:
+       nodeSelector:
+         kubernetes.io/hostname: kmesh-testing-control-plane
+       tolerations:
+       - key: "node-role.kubernetes.io/control-plane"
+         operator: "Exists"
+         effect: NoSchedule
+       containers:
+       - name: helloworld
+         image: docker.io/istio/examples-helloworld-v1
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: SERVICE_VERSION
+           value: %s
+         ports:
+         - containerPort: 5000
+ `, remoteVer, ns, remoteVer, remoteVer, remoteVer, remoteVer))
 
 		// Sleep client on worker
 		applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: sleep
-  namespace: %s
-  labels:
-    app: sleep
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: sleep
-  template:
-    metadata:
-      labels:
-        app: sleep
-    spec:
-      nodeSelector:
-        kubernetes.io/hostname: kmesh-testing-worker
-      containers:
-      - name: sleep
-        image: curlimages/curl
-        command: ["/bin/sleep","infinity"]
-`, ns))
+ apiVersion: apps/v1
+ kind: Deployment
+ metadata:
+   name: sleep
+   namespace: %s
+   labels:
+     app: sleep
+ spec:
+   replicas: 1
+   selector:
+     matchLabels:
+       app: sleep
+   template:
+     metadata:
+       labels:
+         app: sleep
+     spec:
+       nodeSelector:
+         kubernetes.io/hostname: kmesh-testing-worker
+       containers:
+       - name: sleep
+         image: curlimages/curl
+         command: ["/bin/sleep","infinity"]
+ `, ns))
 
-		// Wait for everything
 		waitForDeployment(ctx, ns, "helloworld-"+localVer)
 		waitForDeployment(ctx, ns, "helloworld-"+remoteVer)
 		waitForDeployment(ctx, ns, "sleep")
@@ -250,9 +260,7 @@ spec:
 	})
 }
 
-// ---------------------------------------------------------------------------
 // Test 2: Local strict via internalTrafficPolicy: Local
-// ---------------------------------------------------------------------------
 func TestLocality_LocalStrict(t *testing.T) {
 	framework.NewTest(t).Run(func(ctx framework.TestContext) {
 		runCommand(ctx, "kubectl label node kmesh-testing-worker topology.kubernetes.io/region=region topology.kubernetes.io/zone=zone1 topology.kubernetes.io/subzone=subzone1 --overwrite")
@@ -266,123 +274,123 @@ func TestLocality_LocalStrict(t *testing.T) {
 
 		// Service in strict Local mode
 		applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: v1
-kind: Service
-metadata:
-  name: %s
-  namespace: %s
-  labels:
-    app: helloworld
-spec:
-  selector:
-    app: helloworld
-  ports:
-  - name: http
-    port: 5000
-    targetPort: 5000
-  internalTrafficPolicy: Local
-`, svc, ns))
+ apiVersion: v1
+ kind: Service
+ metadata:
+   name: %s
+   namespace: %s
+   labels:
+     app: helloworld
+ spec:
+   selector:
+     app: helloworld
+   ports:
+   - name: http
+     port: 5000
+     targetPort: 5000
+   internalTrafficPolicy: Local
+ `, svc, ns))
 
 		// Local deployment
 		applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: helloworld-%s
-  namespace: %s
-  labels:
-    app: helloworld
-    version: %s
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: helloworld
-      version: %s
-  template:
-    metadata:
-      labels:
-        app: helloworld
-        version: %s
-    spec:
-      nodeSelector:
-        kubernetes.io/hostname: kmesh-testing-worker
-      containers:
-      - name: helloworld
-        image: docker.io/istio/examples-helloworld-v1
-        imagePullPolicy: IfNotPresent
-        env:
-        - name: SERVICE_VERSION
-          value: %s
-        ports:
-        - containerPort: 5000
-`, localVer, ns, localVer, localVer, localVer, localVer))
+ apiVersion: apps/v1
+ kind: Deployment
+ metadata:
+   name: helloworld-%s
+   namespace: %s
+   labels:
+     app: helloworld
+     version: %s
+ spec:
+   replicas: 1
+   selector:
+     matchLabels:
+       app: helloworld
+       version: %s
+   template:
+     metadata:
+       labels:
+         app: helloworld
+         version: %s
+     spec:
+       nodeSelector:
+         kubernetes.io/hostname: kmesh-testing-worker
+       containers:
+       - name: helloworld
+         image: docker.io/istio/examples-helloworld-v1
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: SERVICE_VERSION
+           value: %s
+         ports:
+         - containerPort: 5000
+ `, localVer, ns, localVer, localVer, localVer, localVer))
 
 		// Remote deployment (to prove strict mode blocks it)
 		applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: helloworld-%s
-  namespace: %s
-  labels:
-    app: helloworld
-    version: %s
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: helloworld
-      version: %s
-  template:
-    metadata:
-      labels:
-        app: helloworld
-        version: %s
-    spec:
-      nodeSelector:
-        kubernetes.io/hostname: kmesh-testing-control-plane
-      tolerations:
-      - key: "node-role.kubernetes.io/control-plane"
-        operator: "Exists"
-        effect: NoSchedule
-      containers:
-      - name: helloworld
-        image: docker.io/istio/examples-helloworld-v1
-        imagePullPolicy: IfNotPresent
-        env:
-        - name: SERVICE_VERSION
-          value: %s
-        ports:
-        - containerPort: 5000
-`, remoteVer, ns, remoteVer, remoteVer, remoteVer, remoteVer))
+ apiVersion: apps/v1
+ kind: Deployment
+ metadata:
+   name: helloworld-%s
+   namespace: %s
+   labels:
+     app: helloworld
+     version: %s
+ spec:
+   replicas: 1
+   selector:
+     matchLabels:
+       app: helloworld
+       version: %s
+   template:
+     metadata:
+       labels:
+         app: helloworld
+         version: %s
+     spec:
+       nodeSelector:
+         kubernetes.io/hostname: kmesh-testing-control-plane
+       tolerations:
+       - key: "node-role.kubernetes.io/control-plane"
+         operator: "Exists"
+         effect: NoSchedule
+       containers:
+       - name: helloworld
+         image: docker.io/istio/examples-helloworld-v1
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: SERVICE_VERSION
+           value: %s
+         ports:
+         - containerPort: 5000
+ `, remoteVer, ns, remoteVer, remoteVer, remoteVer, remoteVer))
 
 		// Sleep client
 		applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: sleep
-  namespace: %s
-  labels:
-    app: sleep
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: sleep
-  template:
-    metadata:
-      labels:
-        app: sleep
-    spec:
-      nodeSelector:
-        kubernetes.io/hostname: kmesh-testing-worker
-      containers:
-      - name: sleep
-        image: curlimages/curl
-        command: ["/bin/sleep","infinity"]
-`, ns))
+ apiVersion: apps/v1
+ kind: Deployment
+ metadata:
+   name: sleep
+   namespace: %s
+   labels:
+     app: sleep
+ spec:
+   replicas: 1
+   selector:
+     matchLabels:
+       app: sleep
+   template:
+     metadata:
+       labels:
+         app: sleep
+     spec:
+       nodeSelector:
+         kubernetes.io/hostname: kmesh-testing-worker
+       containers:
+       - name: sleep
+         image: curlimages/curl
+         command: ["/bin/sleep","infinity"]
+ `, ns))
 
 		waitForDeployment(ctx, ns, "helloworld-"+localVer)
 		waitForDeployment(ctx, ns, "helloworld-"+remoteVer)
@@ -406,9 +414,7 @@ spec:
 	})
 }
 
-// ---------------------------------------------------------------------------
 // Test 3: Subzone distribution across two fallback pods
-// ---------------------------------------------------------------------------
 func TestLocality_SubzoneDistribution(t *testing.T) {
 	framework.NewTest(t).Run(func(ctx framework.TestContext) {
 		runCommand(ctx, "kubectl label node kmesh-testing-worker topology.kubernetes.io/region=region topology.kubernetes.io/zone=zone1 topology.kubernetes.io/subzone=subzone1 --overwrite")
@@ -423,124 +429,124 @@ func TestLocality_SubzoneDistribution(t *testing.T) {
 
 		// Service again via annotation
 		applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: v1
-kind: Service
-metadata:
-  name: %s
-  namespace: %s
-  annotations:
-    networking.istio.io/traffic-distribution: PreferClose
-  labels:
-    app: helloworld
-spec:
-  selector:
-    app: helloworld
-  ports:
-  - name: http
-    port: 5000
-    targetPort: 5000
-`, svc, ns))
+ apiVersion: v1
+ kind: Service
+ metadata:
+   name: %s
+   namespace: %s
+   annotations:
+     networking.istio.io/traffic-distribution: PreferClose
+   labels:
+     app: helloworld
+ spec:
+   selector:
+     app: helloworld
+   ports:
+   - name: http
+     port: 5000
+     targetPort: 5000
+ `, svc, ns))
 
 		// Local
 		applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: helloworld-%s
-  namespace: %s
-  labels:
-    app: helloworld
-    version: %s
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: helloworld
-      version: %s
-  template:
-    metadata:
-      labels:
-        app: helloworld
-        version: %s
-    spec:
-      nodeSelector:
-        kubernetes.io/hostname: kmesh-testing-worker
-      containers:
-      - name: helloworld
-        image: docker.io/istio/examples-helloworld-v1
-        env:
-        - name: SERVICE_VERSION
-          value: %s
-        ports:
-        - containerPort: 5000
-`, localVer, ns, localVer, localVer, localVer, localVer))
+ apiVersion: apps/v1
+ kind: Deployment
+ metadata:
+   name: helloworld-%s
+   namespace: %s
+   labels:
+     app: helloworld
+     version: %s
+ spec:
+   replicas: 1
+   selector:
+     matchLabels:
+       app: helloworld
+       version: %s
+   template:
+     metadata:
+       labels:
+         app: helloworld
+         version: %s
+     spec:
+       nodeSelector:
+         kubernetes.io/hostname: kmesh-testing-worker
+       containers:
+       - name: helloworld
+         image: docker.io/istio/examples-helloworld-v1
+         env:
+         - name: SERVICE_VERSION
+           value: %s
+         ports:
+         - containerPort: 5000
+ `, localVer, ns, localVer, localVer, localVer, localVer))
 
 		// Two fallback (lowercase!)
 		for _, v := range []string{rem1, rem2} {
 			applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: helloworld-%s
-  namespace: %s
-  labels:
-    app: helloworld
-    version: %s
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: helloworld
-      version: %s
-  template:
-    metadata:
-      labels:
-        app: helloworld
-        version: %s
-    spec:
-      nodeSelector:
-        kubernetes.io/hostname: kmesh-testing-control-plane
-      tolerations:
-      - key: "node-role.kubernetes.io/control-plane"
-        operator: "Exists"
-        effect: NoSchedule
-      containers:
-      - name: helloworld
-        image: docker.io/istio/examples-helloworld-v1
-        env:
-        - name: SERVICE_VERSION
-          value: %s
-        ports:
-        - containerPort: 5000
-`, v, ns, v, v, v, v))
+ apiVersion: apps/v1
+ kind: Deployment
+ metadata:
+   name: helloworld-%s
+   namespace: %s
+   labels:
+     app: helloworld
+     version: %s
+ spec:
+   replicas: 1
+   selector:
+     matchLabels:
+       app: helloworld
+       version: %s
+   template:
+     metadata:
+       labels:
+         app: helloworld
+         version: %s
+     spec:
+       nodeSelector:
+         kubernetes.io/hostname: kmesh-testing-control-plane
+       tolerations:
+       - key: "node-role.kubernetes.io/control-plane"
+         operator: "Exists"
+         effect: NoSchedule
+       containers:
+       - name: helloworld
+         image: docker.io/istio/examples-helloworld-v1
+         env:
+         - name: SERVICE_VERSION
+           value: %s
+         ports:
+         - containerPort: 5000
+ `, v, ns, v, v, v, v))
 		}
 
 		// Sleep client
 		applyManifest(ctx, ns, fmt.Sprintf(`
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: sleep
-  namespace: %s
-  labels:
-    app: sleep
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: sleep
-  template:
-    metadata:
-      labels:
-        app: sleep
-    spec:
-      nodeSelector:
-        kubernetes.io/hostname: kmesh-testing-worker
-      containers:
-      - name: sleep
-        image: curlimages/curl
-        command: ["/bin/sleep","infinity"]
-`, ns))
+ apiVersion: apps/v1
+ kind: Deployment
+ metadata:
+   name: sleep
+   namespace: %s
+   labels:
+     app: sleep
+ spec:
+   replicas: 1
+   selector:
+     matchLabels:
+       app: sleep
+   template:
+     metadata:
+       labels:
+         app: sleep
+     spec:
+       nodeSelector:
+         kubernetes.io/hostname: kmesh-testing-worker
+       containers:
+       - name: sleep
+         image: curlimages/curl
+         command: ["/bin/sleep","infinity"]
+ `, ns))
 
 		waitForDeployment(ctx, ns, "helloworld-"+localVer)
 		waitForDeployment(ctx, ns, "helloworld-"+rem1)
